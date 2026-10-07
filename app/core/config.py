@@ -11,7 +11,11 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "clave_secreta_jwt_porcitech_desarrollo_sena_2026"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/porcitech_db"
-    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://192.168.32.134:3000",
+    ]
     YOLO_WEIGHTS_PATH: str = "weights/best.pt"
 
     @field_validator("CORS_ORIGINS", mode="before")

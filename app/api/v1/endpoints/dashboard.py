@@ -345,4 +345,31 @@ async def get_dashboard_alerts(
             )
         )
 
+    # 3. Alerta de Próximos Partos y Traslado a Maternidad (Estrictamente Hembras)
+    query_partos = text(
+        """
+        SELECT COUNT(DISTINCT s.hembra_id) AS hembras_por_parir
+        FROM reproduccion_servicios s
+        JOIN animales a ON s.hembra_id = a.id
+        WHERE s.deleted_at IS NULL 
+          AND a.deleted_at IS NULL
+          AND LOWER(a.sexo::text) = 'hembra'
+          AND s.estado_confirmacion = 'positiva'
+          AND s.fecha_probable_parto BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '7 days');
+        """
+    )
+    res_partos = await db.execute(query_partos)
+    hembras_por_parir = int(res_partos.scalar() or 0)
+
+    if hembras_por_parir > 0:
+        alerts.append(
+            DashboardAlertItem(
+                id="alert-reproduccion-maternidad",
+                nivel="warning",
+                modulo="reproduccion",
+                mensaje=f"{hembras_por_parir} hembras en ventana crítica de parto (próximos 7 días).",
+                accion_sugerida="Programar traslado preventivo a corrales de paridera / maternidad.",
+            )
+        )
+
     return alerts
