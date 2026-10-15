@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://192.168.32.134:3000",
     ]
+    CORS_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?"
     YOLO_WEIGHTS_PATH: str = "weights/best.pt"
 
     @field_validator("CORS_ORIGINS", mode="before")

@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends
+import logging
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -9,6 +10,7 @@ from app.core.lifespan import lifespan
 from app.api.deps import get_db
 from app.api.v1.api import api_router
 
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -20,15 +22,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Middleware de CORS con soporte para localhost y subredes locales dinámicas
+# Configuración de CORS con orígenes explícitos y regex para redes locales
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$",
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Manejador global de excepciones para garantizar que, incluso ante fallos no capturados,
+    FastAPI adjunte siempre cabeceras CORS y devuelva JSON con detalle en lugar de provocar 'Failed to fetch'.
+    """
+    logger.exception(f"Unhandled error en {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+    )
+
 
 # Registro del APIRouter maestro bajo el prefijo configurado (/api/v1)
 app.include_router(api_router, prefix=settings.API_V1_STR)

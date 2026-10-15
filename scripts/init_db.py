@@ -109,6 +109,8 @@ async def execute_init_sql():
             "animales",
             "inventario_categorias",
             "inventario_items",
+            "inventario_lotes",
+            "movimientos_inventario",
             "protocolos_bioseguridad",
             "registro_pesos",
         ]

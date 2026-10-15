@@ -1,10 +1,10 @@
 import uuid
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.api.deps import get_current_user_optional, get_db
 from app.models.inventario import (
@@ -50,22 +50,28 @@ async def list_categorias(db: AsyncSession = Depends(get_db)):
 
 @router.get("/items", response_model=List[InventarioItemResponse])
 async def list_items(
-    categoria_id: Optional[uuid.UUID] = Query(None, description="Filtrar por categoría"),
+    categoria_id: Optional[str] = Query(None, description="Filtrar por categoría (UUID)"),
     search: Optional[str] = Query(None, description="Búsqueda por nombre o SKU"),
-    bajo_stock: Optional[bool] = Query(None, description="Filtrar insumos bajo stock mínimo"),
+    bajo_stock: Optional[Union[bool, str]] = Query(None, description="Filtrar insumos bajo stock mínimo"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Lista insumos de bodega con filtros opcionales de categoría, búsqueda y alerta de stock.
+    Usa joinedload para cargar la relación 'categoria' de forma segura y libre de MissingGreenlet.
     """
     query = (
         select(InventarioItem)
+        .options(joinedload(InventarioItem.categoria))
         .where(InventarioItem.deleted_at.is_(None))
         .order_by(InventarioItem.nombre.asc())
     )
 
-    if categoria_id:
-        query = query.where(InventarioItem.categoria_id == categoria_id)
+    if categoria_id and str(categoria_id).strip() and str(categoria_id).strip().lower() != "all":
+        try:
+            cat_uuid = uuid.UUID(str(categoria_id).strip())
+            query = query.where(InventarioItem.categoria_id == cat_uuid)
+        except (ValueError, TypeError):
+            pass
 
     if search and search.strip():
         term = f"%{search.strip()}%"
@@ -76,8 +82,14 @@ async def list_items(
             )
         )
 
-    if bajo_stock is True:
-        query = query.where(InventarioItem.stock_actual <= InventarioItem.stock_minimo)
+    if bajo_stock is not None:
+        is_bajo = False
+        if isinstance(bajo_stock, bool):
+            is_bajo = bajo_stock
+        elif isinstance(bajo_stock, str) and bajo_stock.strip().lower() in ("true", "1", "t", "yes"):
+            is_bajo = True
+        if is_bajo:
+            query = query.where(InventarioItem.stock_actual <= InventarioItem.stock_minimo)
 
     result = await db.execute(query)
     items = result.scalars().all()
@@ -114,7 +126,6 @@ async def create_item(
     """
     Registra un nuevo artículo de inventario en la base de datos PostgreSQL.
     """
-    # Validar SKU único
     check_sku = select(InventarioItem).where(
         InventarioItem.codigo_sku == item_in.codigo_sku,
         InventarioItem.deleted_at.is_(None),
@@ -126,7 +137,6 @@ async def create_item(
             detail=f"Ya existe un artículo con el código SKU '{item_in.codigo_sku}'",
         )
 
-    # Validar categoría existente
     cat_query = select(InventarioCategoria).where(InventarioCategoria.id == item_in.categoria_id)
     cat_res = await db.execute(cat_query)
     categoria = cat_res.scalar_one_or_none()
@@ -173,10 +183,14 @@ async def create_item(
 async def get_item_detail(id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """
     Retorna el detalle completo de un artículo de inventario junto con sus lotes registrados.
+    Usa selectinload y joinedload para asegurar la carga completa de relaciones en SQLAlchemy asíncrono.
     """
     query = (
         select(InventarioItem)
-        .options(selectinload(InventarioItem.lotes))
+        .options(
+            joinedload(InventarioItem.categoria),
+            selectinload(InventarioItem.lotes),
+        )
         .where(InventarioItem.id == id, InventarioItem.deleted_at.is_(None))
     )
     result = await db.execute(query)
@@ -224,21 +238,36 @@ async def get_item_detail(id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.get("/movimientos", response_model=List[MovimientoInventarioResponse])
 async def list_movimientos(
-    limite: int = Query(20, ge=1, le=500),
-    item_id: Optional[uuid.UUID] = Query(None),
+    limite: Optional[int] = Query(20, ge=1, le=500),
+    item_id: Optional[str] = Query(None, description="Filtrar por insumo (UUID)"),
+    tipo: Optional[str] = Query(None, description="Filtrar por tipo de movimiento"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Retorna el historial de movimientos de bodega (Kardex) ordenados de forma descendente por fecha.
+    Usa joinedload para cargar de forma segura item y usuario sin lanzar MissingGreenlet.
+    Maneja parámetros vacíos o 'all' de forma resiliente.
     """
+    limit_val = limite if (limite and limite > 0) else 20
     query = (
         select(MovimientoInventario)
+        .options(
+            joinedload(MovimientoInventario.item),
+            joinedload(MovimientoInventario.usuario),
+        )
         .order_by(MovimientoInventario.fecha_movimiento.desc())
-        .limit(limite)
+        .limit(limit_val)
     )
 
-    if item_id:
-        query = query.where(MovimientoInventario.item_id == item_id)
+    if item_id and str(item_id).strip() and str(item_id).strip().lower() != "all":
+        try:
+            it_uuid = uuid.UUID(str(item_id).strip())
+            query = query.where(MovimientoInventario.item_id == it_uuid)
+        except (ValueError, TypeError):
+            pass
+
+    if tipo and str(tipo).strip() and str(tipo).strip().lower() != "all":
+        query = query.where(MovimientoInventario.tipo_movimiento == str(tipo).strip())
 
     result = await db.execute(query)
     movimientos = result.scalars().all()
@@ -249,6 +278,9 @@ async def list_movimientos(
         if m.usuario:
             user_name = f"{m.usuario.nombre} {m.usuario.apellido}".strip()
 
+        costo_u = float(m.costo_unitario) if m.costo_unitario is not None else 0.0
+        cantidad_f = float(m.cantidad)
+
         resp.append(
             MovimientoInventarioResponse(
                 id=m.id,
@@ -256,9 +288,9 @@ async def list_movimientos(
                 item_nombre=m.item.nombre if m.item else None,
                 lote_id=m.lote_inventario_id,
                 tipo_movimiento=m.tipo_movimiento,
-                cantidad=float(m.cantidad),
-                costo_unitario=float(m.costo_unitario),
-                costo_total=float(m.costo_unitario * m.cantidad),
+                cantidad=cantidad_f,
+                costo_unitario=costo_u,
+                costo_total=round(costo_u * cantidad_f, 2),
                 fecha_movimiento=m.fecha_movimiento,
                 motivo=m.motivo,
                 usuario_id=m.usuario_id,
@@ -278,7 +310,6 @@ async def register_movimiento(
     """
     Registra una entrada, salida o ajuste en el Kardex y actualiza atómicamente el stock del ítem.
     """
-    # Buscar ítem y bloquear para consistencia en concurrencia
     query_item = (
         select(InventarioItem)
         .where(InventarioItem.id == mov_in.item_id, InventarioItem.deleted_at.is_(None))
@@ -292,15 +323,12 @@ async def register_movimiento(
             detail=f"Insumo con id '{mov_in.item_id}' no encontrado",
         )
 
-    # Identificar lote si aplica
     target_lote_id = mov_in.lote_id or mov_in.lote_inventario_id
 
-    # Determinar costo unitario y total
     costo_unit = Decimal(str(mov_in.costo_unitario)) if mov_in.costo_unitario is not None else item.costo_unitario
     cantidad_dec = Decimal(str(mov_in.cantidad))
     costo_total = costo_unit * cantidad_dec
 
-    # Actualizar stock según tipo de movimiento
     if mov_in.tipo_movimiento in ("entrada_compra", "devolucion"):
         item.stock_actual += cantidad_dec
     elif mov_in.tipo_movimiento in ("salida_consumo", "ajuste_merma"):
@@ -316,7 +344,6 @@ async def register_movimiento(
             detail=f"Tipo de movimiento no válido: '{mov_in.tipo_movimiento}'. Debe ser: entrada_compra, salida_consumo, ajuste_merma o devolucion",
         )
 
-    # Resolver usuario operador
     user_id = await get_fallback_user_id(db, current_user)
 
     nuevo_movimiento = MovimientoInventario(
@@ -334,8 +361,13 @@ async def register_movimiento(
     await db.refresh(nuevo_movimiento)
 
     user_name = None
-    if nuevo_movimiento.usuario:
-        user_name = f"{nuevo_movimiento.usuario.nombre} {nuevo_movimiento.usuario.apellido}".strip()
+    if current_user:
+        user_name = f"{current_user.nombre} {current_user.apellido}".strip()
+    else:
+        user_res = await db.execute(select(Usuario).where(Usuario.id == user_id))
+        user_obj = user_res.scalar_one_or_none()
+        if user_obj:
+            user_name = f"{user_obj.nombre} {user_obj.apellido}".strip()
 
     return MovimientoInventarioResponse(
         id=nuevo_movimiento.id,

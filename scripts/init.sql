@@ -149,25 +149,37 @@ CREATE TABLE IF NOT EXISTS inventario_lotes (
     fecha_fabricacion DATE,
     fecha_vencimiento DATE,
     cantidad_inicial NUMERIC(10,2) NOT NULL,
-    cantidad_actual NUMERIC(10,2) NOT NULL CHECK (cantidad_actual >= 0),
-    costo_unitario NUMERIC(12,2) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    cantidad_disponible NUMERIC(10,2) NOT NULL DEFAULT 0.00 CHECK (cantidad_disponible >= 0),
+    cantidad_actual NUMERIC(10,2) DEFAULT 0.00,
+    costo_unitario NUMERIC(12,2) DEFAULT 0.00,
+    registro_ica VARCHAR(50),
+    id_local UUID,
+    sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- 4.7 Movimientos de Inventario
 CREATE TABLE IF NOT EXISTS movimientos_inventario (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     item_id UUID NOT NULL REFERENCES inventario_items(id) ON DELETE RESTRICT,
+    lote_inventario_id UUID REFERENCES inventario_lotes(id) ON DELETE SET NULL,
     lote_id UUID REFERENCES inventario_lotes(id) ON DELETE SET NULL,
     tipo_movimiento tipo_movimiento_inv_enum NOT NULL,
     cantidad NUMERIC(10,2) NOT NULL CHECK (cantidad > 0),
+    costo_unitario NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     costo_total NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
     fecha_movimiento TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    motivo TEXT,
+    motivo VARCHAR(255),
+    referencia_modulo VARCHAR(50),
+    referencia_id UUID,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- 4.8 Protocolos de Bioseguridad
@@ -407,6 +419,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_inventario_items_updated_at') THEN
         CREATE TRIGGER trg_inventario_items_updated_at BEFORE UPDATE ON inventario_items FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_inventario_lotes_updated_at') THEN
+        CREATE TRIGGER trg_inventario_lotes_updated_at BEFORE UPDATE ON inventario_lotes FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_movimientos_inventario_updated_at') THEN
+        CREATE TRIGGER trg_movimientos_inventario_updated_at BEFORE UPDATE ON movimientos_inventario FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_protocolos_bioseguridad_updated_at') THEN
         CREATE TRIGGER trg_protocolos_bioseguridad_updated_at BEFORE UPDATE ON protocolos_bioseguridad FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
@@ -453,6 +471,27 @@ VALUES
     ('f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'e1eebc99-9c0b-4ef8-bb6d-6bb9bd380a51', 'INS-002', 'Ceba Finalización Harina Forte', 'Bultos (40kg)', 120.00, 30.00, 89000.00, 'Silo 2', 'synced'),
     ('f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'e2eebc99-9c0b-4ef8-bb6d-6bb9bd380a52', 'INS-004', 'Ivermectina 1% Antiparasitario', 'Frascos (250ml)', 15.00, 5.00, 42000.00, 'Botiquín A', 'synced'),
     ('f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'e2eebc99-9c0b-4ef8-bb6d-6bb9bd380a52', 'INS-005', 'Vacuna Peste Porcina Clásica (PPC)', 'Dosis', 100.00, 25.00, 15000.00, 'Nevera 1', 'synced')
+ON CONFLICT (id) DO NOTHING;
+
+-- 7.4.1 Lotes de Inventario
+INSERT INTO inventario_lotes (id, item_id, numero_lote, fecha_fabricacion, fecha_vencimiento, cantidad_inicial, cantidad_disponible, cantidad_actual, costo_unitario, registro_ica, sync_status)
+VALUES
+    ('a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'LOT-ALM-2026-01', '2026-01-15', '2026-07-15', 100.00, 85.00, 85.00, 98000.00, 'ICA-78901', 'synced'),
+    ('a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'LOT-CEB-2026-02', '2026-02-01', '2026-08-01', 150.00, 120.00, 120.00, 89000.00, 'ICA-78902', 'synced'),
+    ('a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'LOT-MED-2026-03', '2025-11-10', '2027-11-10', 20.00, 15.00, 15.00, 42000.00, 'ICA-54321', 'synced'),
+    ('a4eebc99-9c0b-4ef8-bb6d-6bb9bd380a94', 'f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'LOT-VAC-2026-04', '2026-01-05', '2026-12-31', 100.00, 100.00, 100.00, 15000.00, 'ICA-11223', 'synced')
+ON CONFLICT (id) DO NOTHING;
+
+-- 7.4.2 Movimientos Iniciales de Kardex
+INSERT INTO movimientos_inventario (id, item_id, lote_inventario_id, lote_id, tipo_movimiento, cantidad, costo_unitario, costo_total, usuario_id, motivo, sync_status)
+VALUES
+    ('m1eebc99-9c0b-4ef8-bb6d-6bb9bd380a01', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'entrada_compra', 100.00, 98000.00, 9800000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso inicial por compra Factura F-2026-01', 'synced'),
+    ('m2eebc99-9c0b-4ef8-bb6d-6bb9bd380a02', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'salida_consumo', 15.00, 98000.00, 1470000.00, 'b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24', 'Alimentación semanal Lote Precebo', 'synced'),
+    ('m3eebc99-9c0b-4ef8-bb6d-6bb9bd380a03', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'entrada_compra', 150.00, 89000.00, 13350000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso inicial por compra Factura F-2026-02', 'synced'),
+    ('m4eebc99-9c0b-4ef8-bb6d-6bb9bd380a04', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'salida_consumo', 30.00, 89000.00, 2670000.00, 'b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24', 'Ración Corral Engorde Titán', 'synced'),
+    ('m5eebc99-9c0b-4ef8-bb6d-6bb9bd380a05', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'entrada_compra', 20.00, 42000.00, 840000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Dotación botiquín veterinario', 'synced'),
+    ('m6eebc99-9c0b-4ef8-bb6d-6bb9bd380a06', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'salida_consumo', 5.00, 42000.00, 210000.00, 'b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a23', 'Desparasitación plan sanitario general', 'synced'),
+    ('m7eebc99-9c0b-4ef8-bb6d-6bb9bd380a07', 'f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'a4eebc99-9c0b-4ef8-bb6d-6bb9bd380a94', 'a4eebc99-9c0b-4ef8-bb6d-6bb9bd380a94', 'entrada_compra', 100.00, 15000.00, 1500000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso biológicos cadena de frío', 'synced')
 ON CONFLICT (id) DO NOTHING;
 
 -- 7.5 Protocolos de Bioseguridad
