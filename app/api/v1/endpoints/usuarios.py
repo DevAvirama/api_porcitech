@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, require_roles
 from app.core.security import get_password_hash
 from app.models.user import Usuario
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
@@ -23,14 +23,12 @@ def verify_admin_role(current_user: Usuario):
 @router.get("", response_model=List[UserResponse])
 async def list_usuarios(
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles(["administrador"])),
 ):
     """
     Retorna la lista de usuarios activos y registrados en la plataforma.
     Requiere rol de administrador.
     """
-    verify_admin_role(current_user)
-
     query = (
         select(Usuario)
         .where(Usuario.deleted_at.is_(None))
@@ -44,13 +42,12 @@ async def list_usuarios(
 async def create_usuario(
     user_in: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles(["administrador"])),
 ):
     """
     Crea un nuevo usuario en la base de datos con contraseña hasheada con Bcrypt.
     Requiere rol de administrador.
     """
-    verify_admin_role(current_user)
 
     # Validar rol permitido
     allowed_roles = ["administrador", "veterinario", "operario"]
@@ -175,13 +172,12 @@ async def update_usuario(
 async def delete_usuario(
     id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles(["administrador"])),
 ):
     """
     Aplica soft delete al usuario, marcándolo como inactivo.
     Evita que el administrador autenticado se elimine a sí mismo.
     """
-    verify_admin_role(current_user)
 
     if id == current_user.id:
         raise HTTPException(

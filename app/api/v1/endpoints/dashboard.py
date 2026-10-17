@@ -171,12 +171,12 @@ async def get_recent_activity(
                 rp.id_registro::text AS id,
                 'pesaje' AS tipo,
                 CASE 
-                    WHEN rp.metodo = 'vision_ai' THEN 'Pesaje con IA: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
+                    WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Pesaje con IA: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
                     ELSE 'Pesaje Manual: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
                 END AS titulo,
                 'Peso registrado: ' || ROUND(rp.peso_kg::numeric, 2) || ' kg en ' || COALESCE(c.codigo, 'Corral') AS descripcion,
                 rp.tiempo AS tiempo,
-                CASE WHEN rp.metodo = 'vision_ai' THEN 'Visión Artificial' ELSE 'Báscula Digital' END AS usuario,
+                CASE WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Visión Artificial' ELSE 'Báscula Digital' END AS usuario,
                 json_build_object(
                     'peso_kg', rp.peso_kg, 
                     'metodo', rp.metodo::text,

@@ -64,7 +64,7 @@ async def list_animales(
         query = query.offset(offset)
 
     result = await db.execute(query)
-    animales = result.scalars().all()
+    animales = result.unique().scalars().all()
     return [AnimalResponse.model_validate(a) for a in animales]
 
 
@@ -93,7 +93,7 @@ async def get_animal_by_qr(
         )
     )
     result = await db.execute(query)
-    animal = result.scalar_one_or_none()
+    animal = result.unique().scalar_one_or_none()
 
     if not animal:
         raise HTTPException(
@@ -120,7 +120,7 @@ async def get_animal(
         .where(Animal.id == id, Animal.deleted_at.is_(None))
     )
     result = await db.execute(query)
-    animal = result.scalar_one_or_none()
+    animal = result.unique().scalar_one_or_none()
 
     if not animal:
         raise HTTPException(

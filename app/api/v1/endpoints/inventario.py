@@ -88,7 +88,7 @@ async def list_items(
         query = query.offset(offset)
 
     result = await db.execute(query)
-    items = result.scalars().all()
+    items = result.unique().scalars().all()
 
     response_items = []
     for item in items:
@@ -266,7 +266,7 @@ async def list_movimientos(
         query = query.where(MovimientoInventario.tipo_movimiento == str(tipo).strip())
 
     result = await db.execute(query)
-    movimientos = result.scalars().all()
+    movimientos = result.unique().scalars().all()
 
     resp = []
     for m in movimientos:
