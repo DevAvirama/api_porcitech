@@ -5,7 +5,7 @@ from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, estado_sincronizacion_enum
 
 if TYPE_CHECKING:
     from app.models.animal import Animal
@@ -18,18 +18,6 @@ tipo_fase_corral_enum = PG_ENUM(
     "cuarentena",
     "gestacion",
     name="tipo_fase_corral_enum",
-    create_type=False,
-)
-
-estado_sincronizacion_enum = PG_ENUM(
-    "pending",
-    "synced",
-    "conflict",
-    "error",
-    "pendiente",
-    "sincronizado",
-    "conflicto",
-    name="estado_sincronizacion_enum",
     create_type=False,
 )
 

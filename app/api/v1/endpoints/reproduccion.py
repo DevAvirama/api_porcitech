@@ -28,6 +28,78 @@ from app.schemas.reproduccion import (
 router = APIRouter()
 
 
+def _to_servicio_response(s: ReproduccionServicio) -> ReproduccionServicioResponse:
+    tec_nombre = f"{s.tecnico.nombre} {s.tecnico.apellido}".strip() if s.tecnico else None
+    return ReproduccionServicioResponse(
+        id=s.id,
+        hembra_id=s.hembra_id,
+        hembra_arete=s.hembra.codigo_arete if s.hembra else None,
+        hembra_alias=s.hembra.nombre_alias if s.hembra else None,
+        macho_id=s.macho_id,
+        macho_arete=s.macho.codigo_arete if s.macho else None,
+        tecnico_id=s.tecnico_id,
+        tecnico_nombre=tec_nombre,
+        tipo_servicio=s.tipo_servicio,
+        codigo_pajilla_macho=s.codigo_pajilla_macho,
+        fecha_servicio=s.fecha_servicio,
+        fecha_probable_parto=s.fecha_probable_parto,
+        estado_confirmacion=s.estado_confirmacion,
+        fecha_diagnostico=s.fecha_diagnostico,
+        sync_status=s.sync_status,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
+    )
+
+
+def _to_parto_response(p: ReproduccionParto) -> ReproduccionPartoResponse:
+    atendido_nombre = (
+        f"{p.atendido_por_usuario.nombre} {p.atendido_por_usuario.apellido}".strip()
+        if p.atendido_por_usuario
+        else None
+    )
+    return ReproduccionPartoResponse(
+        id=p.id,
+        servicio_id=p.servicio_id,
+        hembra_id=p.hembra_id,
+        hembra_arete=p.hembra.codigo_arete if p.hembra else None,
+        hembra_alias=p.hembra.nombre_alias if p.hembra else None,
+        corral_maternidad_id=p.corral_maternidad_id,
+        corral_maternidad_codigo=p.corral_maternidad.codigo if p.corral_maternidad else None,
+        atendido_por=p.atendido_por,
+        atendido_por_nombre=atendido_nombre,
+        fecha_parto=p.fecha_parto,
+        nacidos_vivos=p.nacidos_vivos,
+        nacidos_muertos=p.nacidos_muertos,
+        momias=p.momias,
+        peso_camada_total_kg=float(p.peso_camada_total_kg),
+        observaciones=p.observaciones,
+        sync_status=p.sync_status,
+        created_at=p.created_at,
+        updated_at=p.updated_at,
+    )
+
+
+def _to_destete_response(d: ReproduccionDestete) -> ReproduccionDesteteResponse:
+    op_name = f"{d.operario.nombre} {d.operario.apellido}".strip() if d.operario else None
+    return ReproduccionDesteteResponse(
+        id=d.id,
+        parto_id=d.parto_id,
+        hembra_id=d.hembra_id,
+        hembra_arete=d.hembra.codigo_arete if d.hembra else None,
+        hembra_alias=d.hembra.nombre_alias if d.hembra else None,
+        corral_destino_id=d.corral_destino_id,
+        corral_destino_codigo=d.corral_destino.codigo if d.corral_destino else None,
+        operario_id=d.operario_id,
+        operario_nombre=op_name,
+        fecha_destete=d.fecha_destete,
+        lechones_destetados=d.lechones_destetados,
+        peso_total_kg=float(d.peso_total_kg),
+        dias_lactancia=d.dias_lactancia,
+        sync_status=d.sync_status,
+        created_at=d.created_at,
+    )
+
+
 # ============================================================================
 # 1. SERVICIOS REPRODUCTIVOS (MONTA / INSEMINACIÓN)
 # ============================================================================
@@ -53,36 +125,8 @@ async def list_servicios(
         query = query.where(ReproduccionServicio.estado_confirmacion == estado)
 
     result = await db.execute(query)
-    servicios = result.scalars().all()
-
-    resp = []
-    for s in servicios:
-        tec_nombre = None
-        if s.tecnico:
-            tec_nombre = f"{s.tecnico.nombre} {s.tecnico.apellido}".strip()
-
-        resp.append(
-            ReproduccionServicioResponse(
-                id=s.id,
-                hembra_id=s.hembra_id,
-                hembra_arete=s.hembra.codigo_arete if s.hembra else None,
-                hembra_alias=s.hembra.nombre_alias if s.hembra else None,
-                macho_id=s.macho_id,
-                macho_arete=s.macho.codigo_arete if s.macho else None,
-                tecnico_id=s.tecnico_id,
-                tecnico_nombre=tec_nombre,
-                tipo_servicio=s.tipo_servicio,
-                codigo_pajilla_macho=s.codigo_pajilla_macho,
-                fecha_servicio=s.fecha_servicio,
-                fecha_probable_parto=s.fecha_probable_parto,
-                estado_confirmacion=s.estado_confirmacion,
-                fecha_diagnostico=s.fecha_diagnostico,
-                sync_status=s.sync_status,
-                created_at=s.created_at,
-                updated_at=s.updated_at,
-            )
-        )
-    return resp
+    servicios = result.unique().scalars().all()
+    return [_to_servicio_response(s) for s in servicios]
 
 
 @router.post("/servicios", response_model=ReproduccionServicioResponse, status_code=status.HTTP_201_CREATED)
@@ -133,31 +177,9 @@ async def create_servicio(
     # Recargar con relaciones y columna generada por PostgreSQL
     stmt = select(ReproduccionServicio).where(ReproduccionServicio.id == nuevo_servicio.id)
     fresh_res = await db.execute(stmt)
-    saved = fresh_res.scalar_one()
+    saved = fresh_res.unique().scalar_one()
 
-    tec_nombre = None
-    if saved.tecnico:
-        tec_nombre = f"{saved.tecnico.nombre} {saved.tecnico.apellido}".strip()
-
-    return ReproduccionServicioResponse(
-        id=saved.id,
-        hembra_id=saved.hembra_id,
-        hembra_arete=saved.hembra.codigo_arete if saved.hembra else None,
-        hembra_alias=saved.hembra.nombre_alias if saved.hembra else None,
-        macho_id=saved.macho_id,
-        macho_arete=saved.macho.codigo_arete if saved.macho else None,
-        tecnico_id=saved.tecnico_id,
-        tecnico_nombre=tec_nombre,
-        tipo_servicio=saved.tipo_servicio,
-        codigo_pajilla_macho=saved.codigo_pajilla_macho,
-        fecha_servicio=saved.fecha_servicio,
-        fecha_probable_parto=saved.fecha_probable_parto,
-        estado_confirmacion=saved.estado_confirmacion,
-        fecha_diagnostico=saved.fecha_diagnostico,
-        sync_status=saved.sync_status,
-        created_at=saved.created_at,
-        updated_at=saved.updated_at,
-    )
+    return _to_servicio_response(saved)
 
 
 @router.put("/servicios/{id}", response_model=ReproduccionServicioResponse)
@@ -171,6 +193,8 @@ async def update_servicio(
     Actualiza el estado de confirmación / diagnóstico de preñez de un servicio reproductivo.
     Si el diagnóstico es 'positiva', actualiza automáticamente el estado de la cerda a 'gestacion'.
     """
+    await resolve_user_or_fallback(db, current_user, role="veterinario")
+
     valid_estados = ["pendiente", "positiva", "negativa", "repetida"]
     clean_estado = body.estado_confirmacion.strip().lower()
     if clean_estado not in valid_estados:
@@ -184,7 +208,7 @@ async def update_servicio(
         ReproduccionServicio.deleted_at.is_(None),
     )
     res = await db.execute(stmt)
-    servicio = res.scalar_one_or_none()
+    servicio = res.unique().scalar_one_or_none()
     if not servicio:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -202,7 +226,7 @@ async def update_servicio(
             Animal.deleted_at.is_(None),
         )
         hembra_res = await db.execute(hembra_query)
-        hembra = hembra_res.scalar_one_or_none()
+        hembra = hembra_res.unique().scalar_one_or_none()
         if hembra:
             if hembra.estado in ("activo", "lactante", "precebo", "levante"):
                 hembra.estado = "gestacion"
@@ -212,31 +236,9 @@ async def update_servicio(
 
     # Recargar con relaciones
     fresh_stmt = select(ReproduccionServicio).where(ReproduccionServicio.id == id)
-    saved = (await db.execute(fresh_stmt)).scalar_one()
+    saved = (await db.execute(fresh_stmt)).unique().scalar_one()
 
-    tec_nombre = None
-    if saved.tecnico:
-        tec_nombre = f"{saved.tecnico.nombre} {saved.tecnico.apellido}".strip()
-
-    return ReproduccionServicioResponse(
-        id=saved.id,
-        hembra_id=saved.hembra_id,
-        hembra_arete=saved.hembra.codigo_arete if saved.hembra else None,
-        hembra_alias=saved.hembra.nombre_alias if saved.hembra else None,
-        macho_id=saved.macho_id,
-        macho_arete=saved.macho.codigo_arete if saved.macho else None,
-        tecnico_id=saved.tecnico_id,
-        tecnico_nombre=tec_nombre,
-        tipo_servicio=saved.tipo_servicio,
-        codigo_pajilla_macho=saved.codigo_pajilla_macho,
-        fecha_servicio=saved.fecha_servicio,
-        fecha_probable_parto=saved.fecha_probable_parto,
-        estado_confirmacion=saved.estado_confirmacion,
-        fecha_diagnostico=saved.fecha_diagnostico,
-        sync_status=saved.sync_status,
-        created_at=saved.created_at,
-        updated_at=saved.updated_at,
-    )
+    return _to_servicio_response(saved)
 
 
 # ============================================================================
@@ -263,37 +265,8 @@ async def list_partos(
         query = query.where(ReproduccionParto.hembra_id == hembra_id)
 
     result = await db.execute(query)
-    partos = result.scalars().all()
-
-    resp = []
-    for p in partos:
-        atendido_nombre = None
-        if p.atendido_por_usuario:
-            atendido_nombre = f"{p.atendido_por_usuario.nombre} {p.atendido_por_usuario.apellido}".strip()
-
-        resp.append(
-            ReproduccionPartoResponse(
-                id=p.id,
-                servicio_id=p.servicio_id,
-                hembra_id=p.hembra_id,
-                hembra_arete=p.hembra.codigo_arete if p.hembra else None,
-                hembra_alias=p.hembra.nombre_alias if p.hembra else None,
-                corral_maternidad_id=p.corral_maternidad_id,
-                corral_maternidad_codigo=p.corral_maternidad.codigo if p.corral_maternidad else None,
-                atendido_por=p.atendido_por,
-                atendido_por_nombre=atendido_nombre,
-                fecha_parto=p.fecha_parto,
-                nacidos_vivos=p.nacidos_vivos,
-                nacidos_muertos=p.nacidos_muertos,
-                momias=p.momias,
-                peso_camada_total_kg=float(p.peso_camada_total_kg),
-                observaciones=p.observaciones,
-                sync_status=p.sync_status,
-                created_at=p.created_at,
-                updated_at=p.updated_at,
-            )
-        )
-    return resp
+    partos = result.unique().scalars().all()
+    return [_to_parto_response(p) for p in partos]
 
 
 @router.post("/partos", response_model=ReproduccionPartoResponse, status_code=status.HTTP_201_CREATED)
@@ -308,7 +281,7 @@ async def create_parto(
     # Validar hembra
     h_query = select(Animal).where(Animal.id == body.hembra_id, Animal.deleted_at.is_(None))
     h_res = await db.execute(h_query)
-    hembra = h_res.scalar_one_or_none()
+    hembra = h_res.unique().scalar_one_or_none()
     if not hembra:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -322,7 +295,7 @@ async def create_parto(
             ReproduccionServicio.deleted_at.is_(None),
         )
         s_res = await db.execute(s_query)
-        servicio = s_res.scalar_one_or_none()
+        servicio = s_res.unique().scalar_one_or_none()
         if not servicio:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -365,32 +338,9 @@ async def create_parto(
     # Recargar con relaciones
     stmt = select(ReproduccionParto).where(ReproduccionParto.id == nuevo_parto.id)
     fresh_res = await db.execute(stmt)
-    saved = fresh_res.scalar_one()
+    saved = fresh_res.unique().scalar_one()
 
-    atendido_nombre = None
-    if saved.atendido_por_usuario:
-        atendido_nombre = f"{saved.atendido_por_usuario.nombre} {saved.atendido_por_usuario.apellido}".strip()
-
-    return ReproduccionPartoResponse(
-        id=saved.id,
-        servicio_id=saved.servicio_id,
-        hembra_id=saved.hembra_id,
-        hembra_arete=saved.hembra.codigo_arete if saved.hembra else None,
-        hembra_alias=saved.hembra.nombre_alias if saved.hembra else None,
-        corral_maternidad_id=saved.corral_maternidad_id,
-        corral_maternidad_codigo=saved.corral_maternidad.codigo if saved.corral_maternidad else None,
-        atendido_por=saved.atendido_por,
-        atendido_por_nombre=atendido_nombre,
-        fecha_parto=saved.fecha_parto,
-        nacidos_vivos=saved.nacidos_vivos,
-        nacidos_muertos=saved.nacidos_muertos,
-        momias=saved.momias,
-        peso_camada_total_kg=float(saved.peso_camada_total_kg),
-        observaciones=saved.observaciones,
-        sync_status=saved.sync_status,
-        created_at=saved.created_at,
-        updated_at=saved.updated_at,
-    )
+    return _to_parto_response(saved)
 
 
 # ============================================================================
@@ -417,34 +367,8 @@ async def list_destetes(
         query = query.where(ReproduccionDestete.hembra_id == hembra_id)
 
     result = await db.execute(query)
-    destetes = result.scalars().all()
-
-    resp = []
-    for d in destetes:
-        op_name = None
-        if d.operario:
-            op_name = f"{d.operario.nombre} {d.operario.apellido}".strip()
-
-        resp.append(
-            ReproduccionDesteteResponse(
-                id=d.id,
-                parto_id=d.parto_id,
-                hembra_id=d.hembra_id,
-                hembra_arete=d.hembra.codigo_arete if d.hembra else None,
-                hembra_alias=d.hembra.nombre_alias if d.hembra else None,
-                corral_destino_id=d.corral_destino_id,
-                corral_destino_codigo=d.corral_destino.codigo if d.corral_destino else None,
-                operario_id=d.operario_id,
-                operario_nombre=op_name,
-                fecha_destete=d.fecha_destete,
-                lechones_destetados=d.lechones_destetados,
-                peso_total_kg=float(d.peso_total_kg),
-                dias_lactancia=d.dias_lactancia,
-                sync_status=d.sync_status,
-                created_at=d.created_at,
-            )
-        )
-    return resp
+    destetes = result.unique().scalars().all()
+    return [_to_destete_response(d) for d in destetes]
 
 
 @router.post("/destetes", response_model=ReproduccionDesteteResponse, status_code=status.HTTP_201_CREATED)
@@ -459,7 +383,7 @@ async def create_destete(
     # Validar hembra
     h_query = select(Animal).where(Animal.id == body.hembra_id, Animal.deleted_at.is_(None))
     h_res = await db.execute(h_query)
-    hembra = h_res.scalar_one_or_none()
+    hembra = h_res.unique().scalar_one_or_none()
     if not hembra:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -488,7 +412,7 @@ async def create_destete(
             ReproduccionParto.deleted_at.is_(None),
         )
         p_res = await db.execute(p_query)
-        parto = p_res.scalar_one_or_none()
+        parto = p_res.unique().scalar_one_or_none()
         if not parto:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -518,26 +442,7 @@ async def create_destete(
     # Recargar con relaciones
     stmt = select(ReproduccionDestete).where(ReproduccionDestete.id == nuevo_destete.id)
     fresh_res = await db.execute(stmt)
-    saved = fresh_res.scalar_one()
+    saved = fresh_res.unique().scalar_one()
 
-    op_name = None
-    if saved.operario:
-        op_name = f"{saved.operario.nombre} {saved.operario.apellido}".strip()
+    return _to_destete_response(saved)
 
-    return ReproduccionDesteteResponse(
-        id=saved.id,
-        parto_id=saved.parto_id,
-        hembra_id=saved.hembra_id,
-        hembra_arete=saved.hembra.codigo_arete if saved.hembra else None,
-        hembra_alias=saved.hembra.nombre_alias if saved.hembra else None,
-        corral_destino_id=saved.corral_destino_id,
-        corral_destino_codigo=saved.corral_destino.codigo if saved.corral_destino else None,
-        operario_id=saved.operario_id,
-        operario_nombre=op_name,
-        fecha_destete=saved.fecha_destete,
-        lechones_destetados=saved.lechones_destetados,
-        peso_total_kg=float(saved.peso_total_kg),
-        dias_lactancia=saved.dias_lactancia,
-        sync_status=saved.sync_status,
-        created_at=saved.created_at,
-    )

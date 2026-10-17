@@ -16,6 +16,7 @@ engine = create_async_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
+    connect_args={"command_timeout": 30},
 )
 
 # Fábrica de sesiones asíncronas
@@ -31,7 +32,5 @@ AsyncSessionLocal = async_sessionmaker(
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Generador asíncrono de sesión de base de datos para inyección de dependencias FastAPI."""
     async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session
+

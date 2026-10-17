@@ -29,6 +29,42 @@ from app.schemas.sanidad import (
 router = APIRouter()
 
 
+def _to_bioseguridad_response(ej: EjecucionBioseguridad) -> EjecucionBioseguridadResponse:
+    return EjecucionBioseguridadResponse(
+        id=ej.id,
+        protocolo_id=ej.protocolo_id,
+        corral_id=ej.corral_id,
+        fecha=ej.fecha_registro.strftime("%Y-%m-%d"),
+        cumplido=ej.cumplido,
+        observaciones=ej.observaciones,
+    )
+
+
+def _to_tratamiento_response(t: SanidadTratamiento) -> SanidadTratamientoResponse:
+    vet_nombre = f"{t.veterinario.nombre} {t.veterinario.apellido}".strip() if t.veterinario else None
+    return SanidadTratamientoResponse(
+        id=t.id,
+        animal_id=t.animal_id,
+        animal_arete=t.animal.codigo_arete if t.animal else None,
+        animal_alias=t.animal.nombre_alias if t.animal else None,
+        corral_id=t.corral_id,
+        corral_codigo=t.corral.codigo if t.corral else None,
+        veterinario_id=t.veterinario_id,
+        veterinario_nombre=vet_nombre,
+        medicamento_id=t.medicamento_id,
+        tipo_evento=t.tipo_evento,
+        producto_nombre=t.producto_nombre,
+        diagnostico=t.diagnostico,
+        dosis=float(t.dosis) if t.dosis is not None else None,
+        unidad_dosis=t.unidad_dosis,
+        via_administracion=t.via_administracion,
+        tiempo_retiro_dias=t.tiempo_retiro_dias,
+        fecha_tratamiento=t.fecha_tratamiento,
+        fecha_proxima_dosis=t.fecha_proxima_dosis,
+        observaciones=t.observaciones,
+    )
+
+
 # ============================================================================
 # 1. PROTOCOLOS Y BIOSEGURIDAD
 # ============================================================================
@@ -71,20 +107,7 @@ async def list_ejecuciones(
     )
     result = await db.execute(query)
     ejecuciones = result.scalars().all()
-
-    response = []
-    for ej in ejecuciones:
-        response.append(
-            EjecucionBioseguridadResponse(
-                id=ej.id,
-                protocolo_id=ej.protocolo_id,
-                corral_id=ej.corral_id,
-                fecha=ej.fecha_registro.strftime("%Y-%m-%d"),
-                cumplido=ej.cumplido,
-                observaciones=ej.observaciones,
-            )
-        )
-    return response
+    return [_to_bioseguridad_response(ej) for ej in ejecuciones]
 
 
 @router.post("/bioseguridad/ejecuciones", response_model=EjecucionBioseguridadResponse)
@@ -131,14 +154,7 @@ async def toggle_protocol_execution(
             existing_exec.observaciones = body.observaciones
         await db.commit()
         await db.refresh(existing_exec)
-        return EjecucionBioseguridadResponse(
-            id=existing_exec.id,
-            protocolo_id=existing_exec.protocolo_id,
-            corral_id=existing_exec.corral_id,
-            fecha=existing_exec.fecha_registro.strftime("%Y-%m-%d"),
-            cumplido=existing_exec.cumplido,
-            observaciones=existing_exec.observaciones,
-        )
+        return _to_bioseguridad_response(existing_exec)
 
     operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
 
@@ -154,14 +170,7 @@ async def toggle_protocol_execution(
     await db.commit()
     await db.refresh(new_exec)
 
-    return EjecucionBioseguridadResponse(
-        id=new_exec.id,
-        protocolo_id=new_exec.protocolo_id,
-        corral_id=new_exec.corral_id,
-        fecha=new_exec.fecha_registro.strftime("%Y-%m-%d"),
-        cumplido=new_exec.cumplido,
-        observaciones=new_exec.observaciones,
-    )
+    return _to_bioseguridad_response(new_exec)
 
 
 # ============================================================================
@@ -195,37 +204,7 @@ async def list_tratamientos(
 
     result = await db.execute(query)
     tratamientos = result.scalars().all()
-
-    resp = []
-    for t in tratamientos:
-        vet_nombre = None
-        if t.veterinario:
-            vet_nombre = f"{t.veterinario.nombre} {t.veterinario.apellido}".strip()
-
-        resp.append(
-            SanidadTratamientoResponse(
-                id=t.id,
-                animal_id=t.animal_id,
-                animal_arete=t.animal.codigo_arete if t.animal else None,
-                animal_alias=t.animal.nombre_alias if t.animal else None,
-                corral_id=t.corral_id,
-                corral_codigo=t.corral.codigo if t.corral else None,
-                veterinario_id=t.veterinario_id,
-                veterinario_nombre=vet_nombre,
-                medicamento_id=t.medicamento_id,
-                tipo_evento=t.tipo_evento,
-                producto_nombre=t.producto_nombre,
-                diagnostico=t.diagnostico,
-                dosis=float(t.dosis) if t.dosis is not None else None,
-                unidad_dosis=t.unidad_dosis,
-                via_administracion=t.via_administracion,
-                tiempo_retiro_dias=t.tiempo_retiro_dias,
-                fecha_tratamiento=t.fecha_tratamiento,
-                fecha_proxima_dosis=t.fecha_proxima_dosis,
-                observaciones=t.observaciones,
-            )
-        )
-    return resp
+    return [_to_tratamiento_response(t) for t in tratamientos]
 
 
 @router.post("/tratamientos", response_model=SanidadTratamientoResponse, status_code=status.HTTP_201_CREATED)
@@ -324,31 +303,8 @@ async def create_tratamiento(
     fresh_res = await db.execute(stmt)
     saved = fresh_res.scalar_one()
 
-    vet_nombre = None
-    if saved.veterinario:
-        vet_nombre = f"{saved.veterinario.nombre} {saved.veterinario.apellido}".strip()
+    return _to_tratamiento_response(saved)
 
-    return SanidadTratamientoResponse(
-        id=saved.id,
-        animal_id=saved.animal_id,
-        animal_arete=saved.animal.codigo_arete if saved.animal else None,
-        animal_alias=saved.animal.nombre_alias if saved.animal else None,
-        corral_id=saved.corral_id,
-        corral_codigo=saved.corral.codigo if saved.corral else None,
-        veterinario_id=saved.veterinario_id,
-        veterinario_nombre=vet_nombre,
-        medicamento_id=saved.medicamento_id,
-        tipo_evento=saved.tipo_evento,
-        producto_nombre=saved.producto_nombre,
-        diagnostico=saved.diagnostico,
-        dosis=float(saved.dosis) if saved.dosis is not None else None,
-        unidad_dosis=saved.unidad_dosis,
-        via_administracion=saved.via_administracion,
-        tiempo_retiro_dias=saved.tiempo_retiro_dias,
-        fecha_tratamiento=saved.fecha_tratamiento,
-        fecha_proxima_dosis=saved.fecha_proxima_dosis,
-        observaciones=saved.observaciones,
-    )
 
 
 # ============================================================================

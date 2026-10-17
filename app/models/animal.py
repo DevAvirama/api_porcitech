@@ -6,7 +6,7 @@ from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Tex
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, estado_sincronizacion_enum
 
 if TYPE_CHECKING:
     from app.models.corral import Corral
@@ -30,18 +30,6 @@ estado_animal_enum = PG_ENUM(
     "muerto",
     "enfermo",
     name="estado_animal_enum",
-    create_type=False,
-)
-
-estado_sincronizacion_enum = PG_ENUM(
-    "pending",
-    "synced",
-    "conflict",
-    "error",
-    "pendiente",
-    "sincronizado",
-    "conflicto",
-    name="estado_sincronizacion_enum",
     create_type=False,
 )
 

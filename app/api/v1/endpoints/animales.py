@@ -2,7 +2,7 @@ import uuid
 from decimal import Decimal
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -13,6 +13,57 @@ from app.models.user import Usuario
 from app.schemas.animal import AnimalCreate, AnimalResponse, AnimalUpdate
 
 router = APIRouter()
+
+ESTADOS_INACTIVOS_CORRAL = ("vendido", "muerto", "descarte")
+
+
+async def _validar_corral_y_capacidad(
+    db: AsyncSession,
+    corral_id: uuid.UUID,
+    exclude_animal_id: Optional[uuid.UUID] = None,
+) -> Corral:
+    """
+    Bloquea la fila del corral con SELECT ... FOR UPDATE, verifica que exista y esté activo,
+    y valida que su ocupación actual no haya alcanzado capacidad_maxima.
+    """
+    corral_query = (
+        select(Corral)
+        .where(
+            Corral.id == corral_id,
+            Corral.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    corral = (await db.execute(corral_query)).scalar_one_or_none()
+    if not corral:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El corral con ID '{corral_id}' no existe o ha sido dado de baja.",
+        )
+    if not corral.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El corral '{corral.codigo}' se encuentra inactivo y no admite asignación de animales.",
+        )
+
+    count_query = select(func.count(Animal.id)).where(
+        Animal.corral_id == corral_id,
+        Animal.deleted_at.is_(None),
+        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+    )
+    if exclude_animal_id is not None:
+        count_query = count_query.where(Animal.id != exclude_animal_id)
+
+    ocupacion_actual = int((await db.execute(count_query)).scalar() or 0)
+    if ocupacion_actual >= corral.capacidad_maxima:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"El corral '{corral.codigo}' ha alcanzado su capacidad máxima "
+                f"({ocupacion_actual}/{corral.capacidad_maxima} animales)."
+            ),
+        )
+    return corral
 
 
 @router.get(
@@ -136,7 +187,7 @@ async def get_animal(
     response_model=AnimalResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Registrar nuevo animal",
-    description="Crea un animal en PostgreSQL validando que el arete y QR sean únicos y que el corral exista.",
+    description="Crea un animal en PostgreSQL validando que el arete y QR sean únicos y que el corral exista y tenga capacidad disponible.",
 )
 async def create_animal(
     animal_in: AnimalCreate,
@@ -161,18 +212,9 @@ async def create_animal(
             detail=f"Ya existe un animal registrado con el arete '{arete_clean}' o QR '{qr_clean}'.",
         )
 
-    # 2. Validar existencia y vigencia del corral si se asigna uno
+    # 2. Validar existencia, vigencia y capacidad del corral si se asigna uno
     if animal_in.corral_id:
-        corral_query = select(Corral).where(
-            Corral.id == animal_in.corral_id,
-            Corral.deleted_at.is_(None),
-        )
-        corral = (await db.execute(corral_query)).scalar_one_or_none()
-        if not corral:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"El corral con ID '{animal_in.corral_id}' no existe o ha sido dado de baja.",
-            )
+        await _validar_corral_y_capacidad(db, animal_in.corral_id)
 
     peso_dec = Decimal(str(animal_in.peso_actual_kg)) if animal_in.peso_actual_kg is not None else Decimal("0.00")
 
@@ -208,7 +250,7 @@ async def create_animal(
     "/{id}",
     response_model=AnimalResponse,
     summary="Actualizar animal",
-    description="Modifica los datos del animal.",
+    description="Modifica los datos del animal validando capacidad disponible en caso de traslado de corral.",
 )
 async def update_animal(
     id: uuid.UUID,
@@ -248,19 +290,12 @@ async def update_animal(
         animal.codigo_arete = arete_clean
 
     # Validar corral si cambió
-    if "corral_id" in update_data and update_data["corral_id"] is not None:
+    if "corral_id" in update_data:
         cid = update_data["corral_id"]
-        corral_check = select(Corral).where(
-            Corral.id == cid,
-            Corral.deleted_at.is_(None),
-            Corral.activo.is_(True),
-        )
-        if not (await db.execute(corral_check)).scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"El corral con ID '{cid}' no existe o no se encuentra activo.",
-            )
+        if cid is not None and cid != animal.corral_id:
+            await _validar_corral_y_capacidad(db, cid, exclude_animal_id=id)
         animal.corral_id = cid
+
 
     for field, val in update_data.items():
         if field not in ("codigo_arete", "corral_id"):

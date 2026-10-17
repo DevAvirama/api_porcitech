@@ -10,27 +10,15 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, estado_sincronizacion_enum
 
 if TYPE_CHECKING:
     from app.models.corral import Corral
     from app.models.inventario import InventarioItem
     from app.models.user import Usuario
-
-estado_sincronizacion_enum = PG_ENUM(
-    "pending",
-    "synced",
-    "conflict",
-    "error",
-    "pendiente",
-    "sincronizado",
-    "conflicto",
-    name="estado_sincronizacion_enum",
-    create_type=False,
-)
 
 
 class AlimentacionRacion(Base):

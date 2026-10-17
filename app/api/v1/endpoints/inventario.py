@@ -27,6 +27,29 @@ from app.schemas.inventario import (
 router = APIRouter()
 
 
+def _to_item_response(
+    item: InventarioItem,
+    categoria: Optional[InventarioCategoria] = None,
+) -> InventarioItemResponse:
+    cat = categoria or item.categoria
+    return InventarioItemResponse(
+        id=item.id,
+        categoria_id=item.categoria_id,
+        categoria_codigo=cat.codigo if cat else None,
+        categoria_nombre=cat.nombre if cat else None,
+        codigo_sku=item.codigo_sku,
+        nombre=item.nombre,
+        unidad_medida=item.unidad_medida,
+        stock_actual=float(item.stock_actual),
+        stock_minimo=float(item.stock_minimo),
+        costo_unitario=float(item.costo_unitario),
+        ubicacion_bodega=item.ubicacion_bodega,
+        sync_status=item.sync_status,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
 @router.get("/categorias", response_model=List[InventarioCategoriaResponse])
 async def list_categorias(db: AsyncSession = Depends(get_db)):
     """
@@ -89,28 +112,7 @@ async def list_items(
 
     result = await db.execute(query)
     items = result.unique().scalars().all()
-
-    response_items = []
-    for item in items:
-        response_items.append(
-            InventarioItemResponse(
-                id=item.id,
-                categoria_id=item.categoria_id,
-                categoria_codigo=item.categoria.codigo if item.categoria else None,
-                categoria_nombre=item.categoria.nombre if item.categoria else None,
-                codigo_sku=item.codigo_sku,
-                nombre=item.nombre,
-                unidad_medida=item.unidad_medida,
-                stock_actual=float(item.stock_actual),
-                stock_minimo=float(item.stock_minimo),
-                costo_unitario=float(item.costo_unitario),
-                ubicacion_bodega=item.ubicacion_bodega,
-                sync_status=item.sync_status,
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-            )
-        )
-    return response_items
+    return [_to_item_response(item) for item in items]
 
 
 @router.post("/items", response_model=InventarioItemResponse, status_code=status.HTTP_201_CREATED)
@@ -122,6 +124,8 @@ async def create_item(
     """
     Registra un nuevo artículo de inventario en la base de datos PostgreSQL.
     """
+    await resolve_user_or_fallback(db, current_user)
+
     check_sku = select(InventarioItem).where(
         InventarioItem.codigo_sku == item_in.codigo_sku,
         InventarioItem.deleted_at.is_(None),
@@ -157,22 +161,7 @@ async def create_item(
     await db.commit()
     await db.refresh(new_item)
 
-    return InventarioItemResponse(
-        id=new_item.id,
-        categoria_id=new_item.categoria_id,
-        categoria_codigo=categoria.codigo,
-        categoria_nombre=categoria.nombre,
-        codigo_sku=new_item.codigo_sku,
-        nombre=new_item.nombre,
-        unidad_medida=new_item.unidad_medida,
-        stock_actual=float(new_item.stock_actual),
-        stock_minimo=float(new_item.stock_minimo),
-        costo_unitario=float(new_item.costo_unitario),
-        ubicacion_bodega=new_item.ubicacion_bodega,
-        sync_status=new_item.sync_status,
-        created_at=new_item.created_at,
-        updated_at=new_item.updated_at,
-    )
+    return _to_item_response(new_item, categoria=categoria)
 
 
 @router.get("/items/{id}", response_model=InventarioItemDetailResponse)
@@ -213,23 +202,12 @@ async def get_item_detail(id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         for l in item.lotes
     ]
 
+    base_resp = _to_item_response(item)
     return InventarioItemDetailResponse(
-        id=item.id,
-        categoria_id=item.categoria_id,
-        categoria_codigo=item.categoria.codigo if item.categoria else None,
-        categoria_nombre=item.categoria.nombre if item.categoria else None,
-        codigo_sku=item.codigo_sku,
-        nombre=item.nombre,
-        unidad_medida=item.unidad_medida,
-        stock_actual=float(item.stock_actual),
-        stock_minimo=float(item.stock_minimo),
-        costo_unitario=float(item.costo_unitario),
-        ubicacion_bodega=item.ubicacion_bodega,
-        sync_status=item.sync_status,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
+        **base_resp.model_dump(),
         lotes=lotes_resp,
     )
+
 
 
 @router.get("/movimientos", response_model=List[MovimientoInventarioResponse])

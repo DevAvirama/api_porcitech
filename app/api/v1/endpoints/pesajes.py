@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
@@ -137,6 +137,8 @@ async def estimar_peso_vision(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> PesajeVisionResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+
     if pixels_per_cm is not None and not (1.0 < pixels_per_cm <= 100.0):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pixels_per_cm debe estar en (1, 100].")
 
@@ -184,16 +186,18 @@ async def estimar_peso_camara_rtsp(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> PesajeVisionResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+
     rtsp_url = (payload.rtsp_url or os.getenv("V380_RTSP_URL") or "").strip()
     if not rtsp_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se indicó rtsp_url ni está definida la variable de entorno V380_RTSP_URL.",
         )
-    if not rtsp_url.lower().startswith(("rtsp://", "rtsps://", "http://", "https://")):
+    if not rtsp_url.lower().startswith(("rtsp://", "rtsps://")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La URL de la cámara debe usar el protocolo rtsp:// o http://.",
+            detail="La URL de la cámara debe usar estrictamente el protocolo rtsp:// o rtsps://.",
         )
 
     model = _obtener_modelo(request)
@@ -244,13 +248,20 @@ async def delete_pesaje(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> PesajeDeleteResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+
     result = await db.execute(select(RegistroPeso).where(RegistroPeso.id_registro == id_registro).limit(1))
     pesaje = result.scalars().first()
     if not pesaje:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No existe el pesaje {id_registro}.")
 
     id_cerdo = pesaje.id_cerdo
-    await db.execute(delete(RegistroPeso).where(RegistroPeso.id_registro == id_registro))
+    await db.execute(
+        delete(RegistroPeso).where(
+            RegistroPeso.id_registro == id_registro,
+            RegistroPeso.tiempo == pesaje.tiempo,
+        )
+    )
 
     ultimo = await db.execute(
         select(RegistroPeso.peso_kg)
@@ -287,6 +298,8 @@ async def create_pesaje_manual(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> PesajeResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+
     # 1. Validar existencia del animal
     animal = await db.get(Animal, pesaje_in.id_cerdo)
     if not animal or animal.deleted_at is not None:
@@ -368,10 +381,11 @@ async def get_pesajes_by_animal(
 
     query = (
         select(RegistroPeso)
-        .options(selectinload(RegistroPeso.corral))
+        .options(joinedload(RegistroPeso.corral))
         .where(RegistroPeso.id_cerdo == animal_id)
         .order_by(desc(RegistroPeso.tiempo))
     )
+
     if isinstance(limit, int):
         query = query.limit(limit)
     if isinstance(offset, int) and offset > 0:

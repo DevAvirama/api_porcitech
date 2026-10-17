@@ -40,9 +40,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     FastAPI adjunte siempre cabeceras CORS y devuelva JSON con detalle en lugar de provocar 'Failed to fetch'.
     """
     logger.exception(f"Unhandled error en {request.method} {request.url.path}: {exc}")
+    is_prod = settings.ENVIRONMENT.lower() == "production"
+    detail = "Error interno del servidor." if is_prod else str(exc)
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc)},
+        content={"detail": detail},
     )
 
 
@@ -76,12 +78,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "ai_vision_loaded": hasattr(app.state, "yolo_model") and app.state.yolo_model is not None,
         }
     except Exception as exc:
+        logger.exception("Error de conectividad en /health: %s", exc)
+        is_prod = settings.ENVIRONMENT.lower() == "production"
+        error_msg = "Base de datos no disponible." if is_prod else str(exc)
         return JSONResponse(
             status_code=503,
             content={
                 "status": "degraded",
                 "database": "disconnected",
-                "error": str(exc),
+                "error": error_msg,
                 "service": f"{settings.PROJECT_NAME} v{settings.VERSION}",
             },
         )
+

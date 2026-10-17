@@ -28,7 +28,7 @@ async def get_dashboard_kpis(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> DashboardKPIsResponse:
-    # 1. Ejecutar métricas consolidadas en una sola consulta CTE (reduce 6 round-trips a 1)
+    # Ejecutar métricas consolidadas y desglose por etapas en una sola consulta CTE
     query_kpis = text(
         """
         WITH metricas_animales AS (
@@ -37,6 +37,16 @@ async def get_dashboard_kpis(
                 COALESCE(AVG(peso_actual_kg) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido') AND peso_actual_kg > 0), 0) AS peso_promedio,
                 COUNT(*) FILTER (WHERE corral_id IS NOT NULL AND deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS asignados
             FROM animales
+        ),
+        etapas_conteo AS (
+            SELECT estado::text AS estado, COUNT(*) AS cantidad
+            FROM animales
+            WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')
+            GROUP BY estado
+        ),
+        metricas_etapas AS (
+            SELECT COALESCE(json_object_agg(estado, cantidad), '{}'::json) AS etapas_json
+            FROM etapas_conteo
         ),
         metricas_corrales AS (
             SELECT 
@@ -52,6 +62,7 @@ async def get_dashboard_kpis(
                    LAG(AVG(rp.peso_kg)) OVER (PARTITION BY rp.corral_id ORDER BY date_trunc('day', rp.tiempo)) AS peso_anterior_kg,
                    LAG(date_trunc('day', rp.tiempo)) OVER (PARTITION BY rp.corral_id ORDER BY date_trunc('day', rp.tiempo)) AS fecha_anterior
             FROM registro_pesos rp
+            WHERE rp.tiempo >= clock_timestamp() - INTERVAL '30 days'
             GROUP BY date_trunc('day', rp.tiempo), rp.corral_id
         ),
         calculos_gmd AS (
@@ -86,12 +97,14 @@ async def get_dashboard_kpis(
             c.capacidad_total,
             g.gmd_promedio,
             s.alertas_sanitarias,
-            i.alertas_stock
+            i.alertas_stock,
+            e.etapas_json
         FROM metricas_animales a
         CROSS JOIN metricas_corrales c
         CROSS JOIN metrica_gmd g
         CROSS JOIN metrica_sanidad s
-        CROSS JOIN metrica_inventario i;
+        CROSS JOIN metrica_inventario i
+        CROSS JOIN metricas_etapas e;
         """
     )
     res_kpis = await db.execute(query_kpis)
@@ -113,17 +126,12 @@ async def get_dashboard_kpis(
         else 0.0
     )
 
-    # 2. Desglose de animales por etapa o estado
-    query_etapas = text(
-        """
-        SELECT estado, COUNT(*) AS cantidad 
-        FROM animales 
-        WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')
-        GROUP BY estado;
-        """
-    )
-    res_etapas = await db.execute(query_etapas)
-    filas_etapas = res_etapas.mappings().all()
+    raw_etapas = kpis.get("etapas_json") or {}
+    if isinstance(raw_etapas, str):
+        try:
+            raw_etapas = json.loads(raw_etapas)
+        except Exception:
+            raw_etapas = {}
 
     distribucion_etapas: Dict[str, int] = {
         "maternidad": 0,
@@ -132,13 +140,14 @@ async def get_dashboard_kpis(
         "engorde": 0,
         "gestacion": 0,
     }
-    for fe in filas_etapas:
-        est = str(fe["estado"])
-        cant = int(fe["cantidad"])
-        if est == "lactante":
-            distribucion_etapas["maternidad"] = distribucion_etapas.get("maternidad", 0) + cant
-        else:
-            distribucion_etapas[est] = cant
+    if isinstance(raw_etapas, dict):
+        for est, cant_val in raw_etapas.items():
+            est_str = str(est)
+            cant = int(cant_val or 0)
+            if est_str == "lactante":
+                distribucion_etapas["maternidad"] = distribucion_etapas.get("maternidad", 0) + cant
+            else:
+                distribucion_etapas[est_str] = cant
 
     return DashboardKPIsResponse(
         total_animales=total_animales,
@@ -167,85 +176,101 @@ async def get_recent_activity(
         """
         WITH eventos AS (
             -- 1. Pesajes de animales
-            SELECT 
-                rp.id_registro::text AS id,
-                'pesaje' AS tipo,
-                CASE 
-                    WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Pesaje con IA: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
-                    ELSE 'Pesaje Manual: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
-                END AS titulo,
-                'Peso registrado: ' || ROUND(rp.peso_kg::numeric, 2) || ' kg en ' || COALESCE(c.codigo, 'Corral') AS descripcion,
-                rp.tiempo AS tiempo,
-                CASE WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Visión Artificial' ELSE 'Báscula Digital' END AS usuario,
-                json_build_object(
-                    'peso_kg', rp.peso_kg, 
-                    'metodo', rp.metodo::text,
-                    'confianza_ia', rp.confianza_ia
-                ) AS metadata
-            FROM registro_pesos rp
-            LEFT JOIN animales a ON rp.id_cerdo = a.id
-            LEFT JOIN corrales c ON rp.corral_id = c.id
+            (
+                SELECT 
+                    rp.id_registro::text AS id,
+                    'pesaje' AS tipo,
+                    CASE 
+                        WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Pesaje con IA: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
+                        ELSE 'Pesaje Manual: #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '')
+                    END AS titulo,
+                    'Peso registrado: ' || ROUND(rp.peso_kg::numeric, 2) || ' kg en ' || COALESCE(c.codigo, 'Corral') AS descripcion,
+                    rp.tiempo AS tiempo,
+                    CASE WHEN rp.metodo::text IN ('vision_ai', 'ia_vision') THEN 'Visión Artificial' ELSE 'Báscula Digital' END AS usuario,
+                    json_build_object(
+                        'peso_kg', rp.peso_kg, 
+                        'metodo', rp.metodo::text,
+                        'confianza_ia', rp.confianza_ia
+                    ) AS metadata
+                FROM registro_pesos rp
+                LEFT JOIN animales a ON rp.id_cerdo = a.id
+                LEFT JOIN corrales c ON rp.corral_id = c.id
+                ORDER BY rp.tiempo DESC
+                LIMIT :limite
+            )
 
             UNION ALL
 
             -- 2. Tratamientos y sanidad
-            SELECT 
-                st.id::text AS id,
-                'sanidad' AS tipo,
-                'Tratamiento: ' || st.producto_nombre AS titulo,
-                COALESCE(st.tipo_evento, 'Evento sanitario') || ' - ' || COALESCE(st.diagnostico, 'Aplicación') AS descripcion,
-                st.fecha_tratamiento AS tiempo,
-                COALESCE(u.nombre || ' ' || u.apellido, 'Veterinario') AS usuario,
-                json_build_object(
-                    'producto', st.producto_nombre,
-                    'dosis', st.dosis,
-                    'unidad', st.unidad_dosis,
-                    'retiro_dias', st.tiempo_retiro_dias
-                ) AS metadata
-            FROM sanidad_tratamientos st
-            LEFT JOIN usuarios u ON st.veterinario_id = u.id
-            WHERE st.deleted_at IS NULL
+            (
+                SELECT 
+                    st.id::text AS id,
+                    'sanidad' AS tipo,
+                    'Tratamiento: ' || st.producto_nombre AS titulo,
+                    COALESCE(st.tipo_evento, 'Evento sanitario') || ' - ' || COALESCE(st.diagnostico, 'Aplicación') AS descripcion,
+                    st.fecha_tratamiento AS tiempo,
+                    COALESCE(u.nombre || ' ' || u.apellido, 'Veterinario') AS usuario,
+                    json_build_object(
+                        'producto', st.producto_nombre,
+                        'dosis', st.dosis,
+                        'unidad', st.unidad_dosis,
+                        'retiro_dias', st.tiempo_retiro_dias
+                    ) AS metadata
+                FROM sanidad_tratamientos st
+                LEFT JOIN usuarios u ON st.veterinario_id = u.id
+                WHERE st.deleted_at IS NULL
+                ORDER BY st.fecha_tratamiento DESC
+                LIMIT :limite
+            )
 
             UNION ALL
 
             -- 3. Movimientos de inventario
-            SELECT 
-                mi.id::text AS id,
-                'inventario' AS tipo,
-                'Movimiento de ' || ii.nombre AS titulo,
-                CASE 
-                    WHEN mi.tipo_movimiento = 'salida_consumo' THEN 'Consumo de ' || mi.cantidad || ' ' || ii.unidad_medida
-                    WHEN mi.tipo_movimiento = 'entrada_compra' THEN 'Ingreso de ' || mi.cantidad || ' ' || ii.unidad_medida
-                    ELSE mi.tipo_movimiento::text || ': ' || mi.cantidad || ' ' || ii.unidad_medida
-                END AS descripcion,
-                mi.fecha_movimiento AS tiempo,
-                COALESCE(u.nombre || ' ' || u.apellido, 'Almacén') AS usuario,
-                json_build_object(
-                    'item', ii.nombre,
-                    'cantidad', mi.cantidad,
-                    'tipo_movimiento', mi.tipo_movimiento::text
-                ) AS metadata
-            FROM movimientos_inventario mi
-            LEFT JOIN inventario_items ii ON mi.item_id = ii.id
-            LEFT JOIN usuarios u ON mi.usuario_id = u.id
+            (
+                SELECT 
+                    mi.id::text AS id,
+                    'inventario' AS tipo,
+                    'Movimiento de ' || ii.nombre AS titulo,
+                    CASE 
+                        WHEN mi.tipo_movimiento = 'salida_consumo' THEN 'Consumo de ' || mi.cantidad || ' ' || ii.unidad_medida
+                        WHEN mi.tipo_movimiento = 'entrada_compra' THEN 'Ingreso de ' || mi.cantidad || ' ' || ii.unidad_medida
+                        ELSE mi.tipo_movimiento::text || ': ' || mi.cantidad || ' ' || ii.unidad_medida
+                    END AS descripcion,
+                    mi.fecha_movimiento AS tiempo,
+                    COALESCE(u.nombre || ' ' || u.apellido, 'Almacén') AS usuario,
+                    json_build_object(
+                        'item', ii.nombre,
+                        'cantidad', mi.cantidad,
+                        'tipo_movimiento', mi.tipo_movimiento::text
+                    ) AS metadata
+                FROM movimientos_inventario mi
+                LEFT JOIN inventario_items ii ON mi.item_id = ii.id
+                LEFT JOIN usuarios u ON mi.usuario_id = u.id
+                ORDER BY mi.fecha_movimiento DESC
+                LIMIT :limite
+            )
 
             UNION ALL
 
             -- 4. Nuevos animales registrados
-            SELECT 
-                a.id::text AS id,
-                'animal' AS tipo,
-                'Ingreso de animal #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '') AS titulo,
-                'Raza: ' || a.raza || ', Arete: ' || a.codigo_arete || ', Sexo: ' || a.sexo::text AS descripcion,
-                a.created_at AS tiempo,
-                'Zootecnia' AS usuario,
-                json_build_object(
-                    'codigo_arete', a.codigo_arete,
-                    'raza', a.raza,
-                    'sexo', a.sexo::text
-                ) AS metadata
-            FROM animales a
-            WHERE a.deleted_at IS NULL
+            (
+                SELECT 
+                    a.id::text AS id,
+                    'animal' AS tipo,
+                    'Ingreso de animal #' || a.codigo_arete || COALESCE(' · ' || a.nombre_alias, '') AS titulo,
+                    'Raza: ' || a.raza || ', Arete: ' || a.codigo_arete || ', Sexo: ' || a.sexo::text AS descripcion,
+                    a.created_at AS tiempo,
+                    'Zootecnia' AS usuario,
+                    json_build_object(
+                        'codigo_arete', a.codigo_arete,
+                        'raza', a.raza,
+                        'sexo', a.sexo::text
+                    ) AS metadata
+                FROM animales a
+                WHERE a.deleted_at IS NULL
+                ORDER BY a.created_at DESC
+                LIMIT :limite
+            )
         )
         SELECT id, tipo, titulo, descripcion, tiempo, usuario, metadata
         FROM eventos
@@ -292,17 +317,38 @@ async def get_dashboard_alerts(
 ) -> List[DashboardAlertItem]:
     alerts: List[DashboardAlertItem] = []
 
-    # 1. Alerta de Retiro Farmacológico Activo
-    query_retiro = text(
+    query_alerts = text(
         """
-        SELECT COUNT(DISTINCT animal_id) AS animales_en_retiro
-        FROM sanidad_tratamientos
-        WHERE deleted_at IS NULL 
-          AND (fecha_tratamiento + (tiempo_retiro_dias || ' days')::interval) > clock_timestamp();
+        SELECT
+            (
+                SELECT COUNT(DISTINCT animal_id)
+                FROM sanidad_tratamientos
+                WHERE deleted_at IS NULL
+                  AND (fecha_tratamiento + (tiempo_retiro_dias || ' days')::interval) > clock_timestamp()
+            ) AS animales_en_retiro,
+            (
+                SELECT COUNT(*)
+                FROM inventario_items
+                WHERE deleted_at IS NULL AND stock_actual <= stock_minimo
+            ) AS items_criticos,
+            (
+                SELECT COUNT(DISTINCT s.hembra_id)
+                FROM reproduccion_servicios s
+                JOIN animales a ON s.hembra_id = a.id
+                WHERE s.deleted_at IS NULL
+                  AND a.deleted_at IS NULL
+                  AND LOWER(a.sexo::text) = 'hembra'
+                  AND s.estado_confirmacion = 'positiva'
+                  AND s.fecha_probable_parto BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '7 days')
+            ) AS hembras_por_parir;
         """
     )
-    res_retiro = await db.execute(query_retiro)
-    animales_en_retiro = int(res_retiro.scalar() or 0)
+    res_alerts = await db.execute(query_alerts)
+    row = res_alerts.mappings().first() or {}
+
+    animales_en_retiro = int(row.get("animales_en_retiro") or 0)
+    items_criticos = int(row.get("items_criticos") or 0)
+    hembras_por_parir = int(row.get("hembras_por_parir") or 0)
 
     if animales_en_retiro > 0:
         alerts.append(
@@ -315,17 +361,6 @@ async def get_dashboard_alerts(
             )
         )
 
-    # 2. Alerta de Stock Crítico en Inventario
-    query_stock = text(
-        """
-        SELECT COUNT(*) AS items_criticos
-        FROM inventario_items
-        WHERE deleted_at IS NULL AND stock_actual <= stock_minimo;
-        """
-    )
-    res_stock = await db.execute(query_stock)
-    items_criticos = int(res_stock.scalar() or 0)
-
     if items_criticos > 0:
         alerts.append(
             DashboardAlertItem(
@@ -336,22 +371,6 @@ async def get_dashboard_alerts(
                 accion_sugerida="Generar orden de compra de alimento o medicamentos de forma prioritaria.",
             )
         )
-
-    # 3. Alerta de Próximos Partos y Traslado a Maternidad (Estrictamente Hembras)
-    query_partos = text(
-        """
-        SELECT COUNT(DISTINCT s.hembra_id) AS hembras_por_parir
-        FROM reproduccion_servicios s
-        JOIN animales a ON s.hembra_id = a.id
-        WHERE s.deleted_at IS NULL 
-          AND a.deleted_at IS NULL
-          AND LOWER(a.sexo::text) = 'hembra'
-          AND s.estado_confirmacion = 'positiva'
-          AND s.fecha_probable_parto BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '7 days');
-        """
-    )
-    res_partos = await db.execute(query_partos)
-    hembras_por_parir = int(res_partos.scalar() or 0)
 
     if hembras_por_parir > 0:
         alerts.append(
@@ -365,3 +384,4 @@ async def get_dashboard_alerts(
         )
 
     return alerts
+

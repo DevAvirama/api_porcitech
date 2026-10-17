@@ -19,6 +19,24 @@ from app.schemas.alimentacion import (
 router = APIRouter()
 
 
+def _to_racion_response(r: AlimentacionRacion) -> AlimentacionRacionResponse:
+    op_name = f"{r.operario.nombre} {r.operario.apellido}".strip() if r.operario else None
+    return AlimentacionRacionResponse(
+        id=r.id,
+        corral_id=r.corral_id,
+        corral_codigo=r.corral.codigo if r.corral else None,
+        alimento_item_id=r.alimento_item_id,
+        alimento_nombre=r.alimento.nombre if r.alimento else None,
+        operario_id=r.operario_id,
+        operario_nombre=op_name,
+        fase_alimentacion=r.fase_alimentacion,
+        cantidad_kg=float(r.cantidad_kg),
+        costo_total=float(r.costo_total),
+        fecha_suministro=r.fecha_suministro,
+        observaciones=r.observaciones,
+    )
+
+
 @router.get("/raciones", response_model=List[AlimentacionRacionResponse])
 async def list_raciones(
     corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral"),
@@ -40,30 +58,7 @@ async def list_raciones(
 
     result = await db.execute(query)
     raciones = result.scalars().all()
-
-    resp = []
-    for r in raciones:
-        op_name = None
-        if r.operario:
-            op_name = f"{r.operario.nombre} {r.operario.apellido}".strip()
-
-        resp.append(
-            AlimentacionRacionResponse(
-                id=r.id,
-                corral_id=r.corral_id,
-                corral_codigo=r.corral.codigo if r.corral else None,
-                alimento_item_id=r.alimento_item_id,
-                alimento_nombre=r.alimento.nombre if r.alimento else None,
-                operario_id=r.operario_id,
-                operario_nombre=op_name,
-                fase_alimentacion=r.fase_alimentacion,
-                cantidad_kg=float(r.cantidad_kg),
-                costo_total=float(r.costo_total),
-                fecha_suministro=r.fecha_suministro,
-                observaciones=r.observaciones,
-            )
-        )
-    return resp
+    return [_to_racion_response(r) for r in raciones]
 
 
 @router.post("/raciones", response_model=AlimentacionRacionResponse, status_code=status.HTTP_201_CREATED)
@@ -153,21 +148,5 @@ async def register_racion(
     fresh_res = await db.execute(stmt)
     saved = fresh_res.scalar_one()
 
-    op_name = None
-    if saved.operario:
-        op_name = f"{saved.operario.nombre} {saved.operario.apellido}".strip()
+    return _to_racion_response(saved)
 
-    return AlimentacionRacionResponse(
-        id=saved.id,
-        corral_id=saved.corral_id,
-        corral_codigo=saved.corral.codigo if saved.corral else None,
-        alimento_item_id=saved.alimento_item_id,
-        alimento_nombre=saved.alimento.nombre if saved.alimento else None,
-        operario_id=saved.operario_id,
-        operario_nombre=op_name,
-        fase_alimentacion=saved.fase_alimentacion,
-        cantidad_kg=float(saved.cantidad_kg),
-        costo_total=float(saved.costo_total),
-        fecha_suministro=saved.fecha_suministro,
-        observaciones=saved.observaciones,
-    )

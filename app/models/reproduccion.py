@@ -13,27 +13,15 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, estado_sincronizacion_enum
 
 if TYPE_CHECKING:
     from app.models.animal import Animal
     from app.models.corral import Corral
     from app.models.user import Usuario
-
-estado_sincronizacion_enum = PG_ENUM(
-    "pending",
-    "synced",
-    "conflict",
-    "error",
-    "pendiente",
-    "sincronizado",
-    "conflicto",
-    name="estado_sincronizacion_enum",
-    create_type=False,
-)
 
 
 class ReproduccionServicio(Base):
@@ -92,7 +80,12 @@ class ReproduccionServicio(Base):
     hembra: Mapped[Optional["Animal"]] = relationship("Animal", foreign_keys=[hembra_id], lazy="joined")
     macho: Mapped[Optional["Animal"]] = relationship("Animal", foreign_keys=[macho_id], lazy="joined")
     tecnico: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
-    parto: Mapped[Optional["ReproduccionParto"]] = relationship("ReproduccionParto", back_populates="servicio", uselist=False)
+    parto: Mapped[Optional["ReproduccionParto"]] = relationship(
+        "ReproduccionParto",
+        back_populates="servicio",
+        uselist=False,
+        lazy="noload",
+    )
 
 
 class ReproduccionParto(Base):
@@ -154,11 +147,20 @@ class ReproduccionParto(Base):
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    servicio: Mapped[Optional["ReproduccionServicio"]] = relationship("ReproduccionServicio", back_populates="parto", lazy="joined")
+    servicio: Mapped[Optional["ReproduccionServicio"]] = relationship(
+        "ReproduccionServicio",
+        back_populates="parto",
+        lazy="noload",
+    )
     hembra: Mapped[Optional["Animal"]] = relationship("Animal", lazy="joined")
     corral_maternidad: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")
     atendido_por_usuario: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
-    destete: Mapped[Optional["ReproduccionDestete"]] = relationship("ReproduccionDestete", back_populates="parto", uselist=False)
+    destete: Mapped[Optional["ReproduccionDestete"]] = relationship(
+        "ReproduccionDestete",
+        back_populates="parto",
+        uselist=False,
+        lazy="noload",
+    )
 
 
 class ReproduccionDestete(Base):
@@ -214,7 +216,12 @@ class ReproduccionDestete(Base):
     )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    parto: Mapped[Optional["ReproduccionParto"]] = relationship("ReproduccionParto", back_populates="destete", lazy="joined")
+    parto: Mapped[Optional["ReproduccionParto"]] = relationship(
+        "ReproduccionParto",
+        back_populates="destete",
+        lazy="noload",
+    )
     hembra: Mapped[Optional["Animal"]] = relationship("Animal", lazy="joined")
     corral_destino: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")
     operario: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
+

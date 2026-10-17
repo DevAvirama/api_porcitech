@@ -152,27 +152,3 @@ def ejecutar_inferencia_morfometrica_sync(
         "imagen_anotada_base64": imagen_base64,
     }
 
-
-def decode_image(image_bytes: bytes) -> np.ndarray:
-    return decodificar_bytes_imagen_sync(image_bytes)
-
-
-def process_pig_frame(model: Any, image_bgr: np.ndarray, conf_thresh: float = 0.45) -> Dict[str, Any]:
-    if model is None:
-        return {"detectado": False, "mensaje": "Modelo no cargado"}
-    try:
-        r = ejecutar_inferencia_morfometrica_sync(model, image_bgr, conf_threshold=conf_thresh)
-        b = r["bbox"]
-        return {
-            "detectado": True,
-            "confianza": r["confianza"],
-            "peso_kg": r["peso_estimado_kg"],
-            "area_cm2": r["area_cm2"],
-            "largo_cm": r["largo_cm"],
-            "ancho_cm": r["ancho_cm"],
-            "bbox": {"x_min": int(b["x1"]), "y_min": int(b["y1"]), "x_max": int(b["x2"]), "y_max": int(b["y2"])},
-            "imagen_anotada_base64": r["imagen_anotada_base64"],
-            "mensaje": "Detección dorsal y pesaje morfométrico exitoso.",
-        }
-    except Exception as e:
-        return {"detectado": False, "mensaje": str(e)}

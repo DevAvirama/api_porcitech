@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -13,26 +13,55 @@ from app.schemas.corral import CorralCreate, CorralResponse, CorralUpdate
 
 router = APIRouter()
 
+ESTADOS_INACTIVOS_CORRAL = ("vendido", "muerto", "descarte")
+
+
+def _to_corral_response(corral: Corral, ocupacion_actual: int = 0) -> CorralResponse:
+    return CorralResponse(
+        id=corral.id,
+        codigo=corral.codigo,
+        descripcion=corral.descripcion,
+        fase=corral.fase,
+        capacidad_maxima=corral.capacidad_maxima,
+        activo=corral.activo,
+        ocupacion_actual=int(ocupacion_actual or 0),
+        fecha_inicio=corral.fecha_inicio,
+        fecha_cierre=corral.fecha_cierre,
+        created_at=corral.created_at,
+    )
+
 
 @router.get(
     "",
     response_model=List[CorralResponse],
     summary="Listar corrales",
-    description="Retorna la lista de corrales activos o filtrados por estado, ordenados por código.",
+    description="Retorna la lista de corrales activos o filtrados por estado, ordenados por código, incluyendo su ocupación actual.",
 )
 async def list_corrales(
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     db: AsyncSession = Depends(get_db),
 ) -> List[CorralResponse]:
-    query = select(Corral).where(Corral.deleted_at.is_(None))
+    query = (
+        select(Corral, func.count(Animal.id).label("ocupacion_actual"))
+        .outerjoin(
+            Animal,
+            and_(
+                Animal.corral_id == Corral.id,
+                Animal.deleted_at.is_(None),
+                cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+            ),
+        )
+        .where(Corral.deleted_at.is_(None))
+        .group_by(Corral.id)
+    )
 
     if activo is not None:
         query = query.where(Corral.activo == activo)
 
     query = query.order_by(Corral.codigo.asc())
     result = await db.execute(query)
-    corrales = result.scalars().all()
-    return [CorralResponse.model_validate(c) for c in corrales]
+    rows = result.all()
+    return [_to_corral_response(corral, ocupacion) for corral, ocupacion in rows]
 
 
 @router.get(
@@ -45,16 +74,30 @@ async def get_corral(
     id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> CorralResponse:
-    query = select(Corral).where(Corral.id == id, Corral.deleted_at.is_(None))
+    query = (
+        select(Corral, func.count(Animal.id).label("ocupacion_actual"))
+        .outerjoin(
+            Animal,
+            and_(
+                Animal.corral_id == Corral.id,
+                Animal.deleted_at.is_(None),
+                cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+            ),
+        )
+        .where(Corral.id == id, Corral.deleted_at.is_(None))
+        .group_by(Corral.id)
+    )
     result = await db.execute(query)
-    corral = result.scalar_one_or_none()
+    row = result.first()
 
-    if not corral:
+    if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Corral no encontrado o inactivo",
         )
-    return CorralResponse.model_validate(corral)
+    corral, ocupacion = row
+    return _to_corral_response(corral, ocupacion)
+
 
 
 @router.post(
@@ -95,7 +138,7 @@ async def create_corral(
     db.add(corral)
     await db.commit()
     await db.refresh(corral)
-    return CorralResponse.model_validate(corral)
+    return _to_corral_response(corral, 0)
 
 
 @router.put(
@@ -120,6 +163,13 @@ async def update_corral(
             detail="Corral no encontrado para actualizar",
         )
 
+    ocupacion_query = select(func.count(Animal.id)).where(
+        Animal.corral_id == id,
+        Animal.deleted_at.is_(None),
+        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+    )
+    ocupacion_actual = int((await db.execute(ocupacion_query)).scalar() or 0)
+
     update_data = corral_in.model_dump(exclude_unset=True)
 
     if "codigo" in update_data and update_data["codigo"]:
@@ -143,6 +193,14 @@ async def update_corral(
         corral.fase = update_data["fase"].strip().lower()
 
     if "capacidad_maxima" in update_data and update_data["capacidad_maxima"] is not None:
+        if update_data["capacidad_maxima"] < ocupacion_actual:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"La capacidad máxima ({update_data['capacidad_maxima']}) no puede ser menor "
+                    f"que la ocupación actual del corral ({ocupacion_actual} animales)."
+                ),
+            )
         corral.capacidad_maxima = update_data["capacidad_maxima"]
 
     if "fecha_inicio" in update_data:
@@ -160,7 +218,7 @@ async def update_corral(
     corral.updated_at = func.clock_timestamp()
     await db.commit()
     await db.refresh(corral)
-    return CorralResponse.model_validate(corral)
+    return _to_corral_response(corral, ocupacion_actual)
 
 
 @router.delete(
@@ -184,11 +242,11 @@ async def delete_corral(
         )
 
     # Validar que no tenga animales asignados activos
-    animals_query = select(Animal).where(
+    animals_query = select(Animal.id).where(
         Animal.corral_id == id,
         Animal.deleted_at.is_(None),
-        Animal.estado.notin_(["vendido", "muerto"]),
-    )
+        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+    ).limit(1)
     animals_result = await db.execute(animals_query)
     if animals_result.scalars().first():
         raise HTTPException(
@@ -204,3 +262,4 @@ async def delete_corral(
 
     await db.commit()
     return {"message": f"Corral '{corral.codigo}' eliminado lógicamente con éxito."}
+

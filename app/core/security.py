@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 import jwt
@@ -14,9 +15,20 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    """Verifica la contraseña en un hilo separado para no bloquear el event loop de asyncio."""
+    return await asyncio.to_thread(pwd_context.verify, plain_password, hashed_password)
+
+
 def get_password_hash(password: str) -> str:
     """Genera el hash Bcrypt para una contraseña."""
     return pwd_context.hash(password)
+
+
+async def get_password_hash_async(password: str) -> str:
+    """Genera el hash Bcrypt en un hilo separado para no bloquear el event loop de asyncio."""
+    return await asyncio.to_thread(pwd_context.hash, password)
+
 
 
 def create_access_token(

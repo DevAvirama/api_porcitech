@@ -28,8 +28,10 @@ class CorralUpdate(BaseModel):
 
 class CorralResponse(CorralBase):
     id: uuid.UUID = Field(..., description="Identificador único UUID del corral")
+    ocupacion_actual: int = Field(0, ge=0, description="Cantidad de animales activos actualmente en el corral")
     fecha_inicio: date = Field(..., description="Fecha de inicio")
     fecha_cierre: Optional[date] = Field(None, description="Fecha de cierre proyectada o ejecutada")
     created_at: datetime = Field(..., description="Fecha de creación del registro")
 
     model_config = ConfigDict(from_attributes=True)
+

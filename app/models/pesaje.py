@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID, JSONB, DOUBLE_PRECISION
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, estado_sincronizacion_enum
 
 if TYPE_CHECKING:
     from app.models.animal import Animal
@@ -17,18 +17,6 @@ metodo_pesaje_enum = PG_ENUM(
     "ia_vision",
     "bascula_digital",
     name="metodo_pesaje_enum",
-    create_type=False,
-)
-
-estado_sincronizacion_enum = PG_ENUM(
-    "pending",
-    "synced",
-    "conflict",
-    "error",
-    "pendiente",
-    "sincronizado",
-    "conflicto",
-    name="estado_sincronizacion_enum",
     create_type=False,
 )
 
@@ -109,8 +97,9 @@ class RegistroPeso(Base):
         server_default=func.clock_timestamp(),
     )
 
-    animal: Mapped[Optional["Animal"]] = relationship("Animal", lazy="selectin")
-    corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="selectin")
+    animal: Mapped[Optional["Animal"]] = relationship("Animal", lazy="noload")
+    corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="noload")
 
     def __repr__(self) -> str:
         return f"<RegistroPeso(id={self.id_registro}, cerdo={self.id_cerdo}, peso={self.peso_kg}kg, metodo='{self.metodo}')>"
+

@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, require_roles
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash_async
 from app.models.user import Usuario
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
 
@@ -71,7 +71,7 @@ async def create_usuario(
             detail=f"El correo electrónico '{clean_email}' ya se encuentra registrado.",
         )
 
-    hashed_pw = get_password_hash(user_in.password)
+    hashed_pw = await get_password_hash_async(user_in.password)
 
     new_user = Usuario(
         nombre=user_in.nombre.strip(),
@@ -159,7 +159,8 @@ async def update_usuario(
             )
         user.activo = user_update.activo
     if user_update.password:
-        user.password_hash = get_password_hash(user_update.password)
+        user.password_hash = await get_password_hash_async(user_update.password)
+
 
     user.updated_at = func.clock_timestamp()
     await db.commit()

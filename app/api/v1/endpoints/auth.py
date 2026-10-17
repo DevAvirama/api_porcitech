@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
-from app.core.security import create_access_token, verify_password
+from app.core.security import create_access_token, verify_password_async
 from app.models.user import Usuario
 from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.user import UserResponse
@@ -31,11 +31,12 @@ async def login(
     result = await db.execute(query)
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(login_data.password, user.password_hash):
+    if not user or not await verify_password_async(login_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credenciales incorrectas",
         )
+
 
     if not user.activo:
         raise HTTPException(
