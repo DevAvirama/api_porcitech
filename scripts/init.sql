@@ -400,7 +400,14 @@ SELECT dia_bucket AS fecha,
        END AS variacion_porcentual
 FROM serie_pesos;
 
--- 6. TRIGGERS DE AUDITORÍA
+-- 6. ÍNDICES DE RENDIMIENTO ADICIONALES Y TRIGGERS DE AUDITORÍA
+CREATE INDEX IF NOT EXISTS idx_inventario_lotes_item ON inventario_lotes (item_id);
+CREATE INDEX IF NOT EXISTS idx_movimientos_inv_item_fecha ON movimientos_inventario (item_id, fecha_movimiento DESC);
+CREATE INDEX IF NOT EXISTS idx_ejecucion_bio_fecha ON ejecucion_bioseguridad (protocolo_id, fecha_registro DESC);
+CREATE INDEX IF NOT EXISTS idx_reprod_servicios_hembra ON reproduccion_servicios (hembra_id, estado_confirmacion, fecha_probable_parto);
+CREATE INDEX IF NOT EXISTS idx_reprod_partos_hembra_fecha ON reproduccion_partos (hembra_id, fecha_parto DESC);
+CREATE INDEX IF NOT EXISTS idx_reprod_destetes_hembra_fecha ON reproduccion_destetes (hembra_id, fecha_destete DESC);
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_usuarios_updated_at') THEN
@@ -423,6 +430,21 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_protocolos_bioseguridad_updated_at') THEN
         CREATE TRIGGER trg_protocolos_bioseguridad_updated_at BEFORE UPDATE ON protocolos_bioseguridad FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_sanidad_tratamientos_updated_at') THEN
+        CREATE TRIGGER trg_sanidad_tratamientos_updated_at BEFORE UPDATE ON sanidad_tratamientos FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_alimentacion_raciones_updated_at') THEN
+        CREATE TRIGGER trg_alimentacion_raciones_updated_at BEFORE UPDATE ON alimentacion_raciones FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_reproduccion_servicios_updated_at') THEN
+        CREATE TRIGGER trg_reproduccion_servicios_updated_at BEFORE UPDATE ON reproduccion_servicios FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_reproduccion_partos_updated_at') THEN
+        CREATE TRIGGER trg_reproduccion_partos_updated_at BEFORE UPDATE ON reproduccion_partos FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_reproduccion_destetes_updated_at') THEN
+        CREATE TRIGGER trg_reproduccion_destetes_updated_at BEFORE UPDATE ON reproduccion_destetes FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
 END $$;
 

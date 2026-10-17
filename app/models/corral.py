@@ -86,11 +86,11 @@ class Corral(Base):
         nullable=True,
     )
 
-    # Relación bidireccional con animales en el corral
+    # Relación bidireccional con animales en el corral (noload por defecto para evitar cargas en cascada innecesarias)
     animales: Mapped[List["Animal"]] = relationship(
         "Animal",
         back_populates="corral",
-        lazy="selectin",
+        lazy="noload",
     )
 
     def __repr__(self) -> str:

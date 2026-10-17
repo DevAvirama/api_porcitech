@@ -147,9 +147,8 @@ async def register_racion(
     )
     db.add(nueva_racion)
     await db.commit()
-    await db.refresh(nueva_racion)
 
-    # Recargar con relaciones
+    # Recargar con relaciones en una sola consulta
     stmt = select(AlimentacionRacion).where(AlimentacionRacion.id == nueva_racion.id)
     fresh_res = await db.execute(stmt)
     saved = fresh_res.scalar_one()

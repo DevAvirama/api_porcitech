@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 metodo_pesaje_enum = PG_ENUM(
     "manual",
     "vision_ai",
+    "ia_vision",
     "bascula_digital",
     name="metodo_pesaje_enum",
     create_type=False,

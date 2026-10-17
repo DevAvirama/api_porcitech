@@ -102,9 +102,11 @@ async def update_usuario(
 ):
     """
     Actualiza la información de un usuario registrado.
-    Requiere rol de administrador.
+    Los administradores pueden actualizar cualquier usuario; los demás roles solo su propio perfil.
     """
-    verify_admin_role(current_user)
+    is_admin = (current_user.rol or "").lower() == "administrador"
+    if id != current_user.id and not is_admin:
+        verify_admin_role(current_user)
 
     query = select(Usuario).where(Usuario.id == id, Usuario.deleted_at.is_(None))
     res = await db.execute(query)
@@ -137,6 +139,11 @@ async def update_usuario(
     if user_update.apellido is not None:
         user.apellido = user_update.apellido.strip()
     if user_update.rol is not None:
+        if not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo un administrador puede modificar el rol de un usuario.",
+            )
         clean_role = user_update.rol.strip().lower()
         allowed_roles = ["administrador", "veterinario", "operario"]
         if clean_role not in allowed_roles:
@@ -148,6 +155,11 @@ async def update_usuario(
     if user_update.telefono is not None:
         user.telefono = user_update.telefono.strip() if user_update.telefono else None
     if user_update.activo is not None:
+        if not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo un administrador puede modificar el estado activo de un usuario.",
+            )
         user.activo = user_update.activo
     if user_update.password:
         user.password_hash = get_password_hash(user_update.password)

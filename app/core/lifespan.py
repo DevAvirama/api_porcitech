@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # --- FASE DE ARRANQUE (STARTUP) ---
     logger.info(f"🚀 Iniciando {settings.PROJECT_NAME} v{settings.VERSION}...")
+    app.state.yolo_lock = asyncio.Lock()
     
     # Carga del Modelo YOLO de Visión Artificial
     backend_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

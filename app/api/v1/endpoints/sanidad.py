@@ -62,9 +62,12 @@ async def list_ejecuciones(
     Retorna las ejecuciones o cumplimientos de protocolos para una fecha específica (YYYY-MM-DD).
     """
     target_date = fecha or date.today()
+    start_dt = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
 
     query = select(EjecucionBioseguridad).where(
-        func.date(EjecucionBioseguridad.fecha_ejecucion) == target_date
+        EjecucionBioseguridad.fecha_registro >= start_dt,
+        EjecucionBioseguridad.fecha_registro < end_dt,
     )
     result = await db.execute(query)
     ejecuciones = result.scalars().all()
@@ -76,7 +79,7 @@ async def list_ejecuciones(
                 id=ej.id,
                 protocolo_id=ej.protocolo_id,
                 corral_id=ej.corral_id,
-                fecha=ej.fecha_ejecucion.strftime("%Y-%m-%d"),
+                fecha=ej.fecha_registro.strftime("%Y-%m-%d"),
                 cumplido=ej.cumplido,
                 observaciones=ej.observaciones,
             )
@@ -94,6 +97,8 @@ async def toggle_protocol_execution(
     Registra o actualiza el toggle de cumplimiento de un protocolo de bioseguridad para el día actual.
     """
     today = date.today()
+    start_dt = datetime.combine(today, time.min, tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
 
     # Validar existencia del protocolo
     p_query = select(ProtocoloBioseguridad).where(
@@ -108,10 +113,11 @@ async def toggle_protocol_execution(
             detail=f"Protocolo con id '{body.protocolo_id}' no encontrado",
         )
 
-    # Buscar ejecución existente hoy
+    # Buscar ejecución existente hoy (rango indexable por fecha_registro)
     query_exec = select(EjecucionBioseguridad).where(
         EjecucionBioseguridad.protocolo_id == body.protocolo_id,
-        func.date(EjecucionBioseguridad.fecha_ejecucion) == today,
+        EjecucionBioseguridad.fecha_registro >= start_dt,
+        EjecucionBioseguridad.fecha_registro < end_dt,
     )
     if body.corral_id:
         query_exec = query_exec.where(EjecucionBioseguridad.corral_id == body.corral_id)
@@ -129,7 +135,7 @@ async def toggle_protocol_execution(
             id=existing_exec.id,
             protocolo_id=existing_exec.protocolo_id,
             corral_id=existing_exec.corral_id,
-            fecha=existing_exec.fecha_ejecucion.strftime("%Y-%m-%d"),
+            fecha=existing_exec.fecha_registro.strftime("%Y-%m-%d"),
             cumplido=existing_exec.cumplido,
             observaciones=existing_exec.observaciones,
         )
@@ -140,7 +146,7 @@ async def toggle_protocol_execution(
         protocolo_id=body.protocolo_id,
         operario_id=operario_id,
         corral_id=body.corral_id,
-        cumplido=body.cumplido,
+        estado="completado" if body.cumplido else "pendiente",
         observaciones=body.observaciones,
         sync_status="synced",
     )
@@ -152,7 +158,7 @@ async def toggle_protocol_execution(
         id=new_exec.id,
         protocolo_id=new_exec.protocolo_id,
         corral_id=new_exec.corral_id,
-        fecha=new_exec.fecha_ejecucion.strftime("%Y-%m-%d"),
+        fecha=new_exec.fecha_registro.strftime("%Y-%m-%d"),
         cumplido=new_exec.cumplido,
         observaciones=new_exec.observaciones,
     )
@@ -309,9 +315,8 @@ async def create_tratamiento(
     )
     db.add(nuevo_tratamiento)
     await db.commit()
-    await db.refresh(nuevo_tratamiento)
 
-    # Recargar con relaciones
+    # Recargar con relaciones en una sola consulta
     stmt = (
         select(SanidadTratamiento)
         .where(SanidadTratamiento.id == nuevo_tratamiento.id)
@@ -354,7 +359,7 @@ async def create_tratamiento(
 async def list_alertas_retiro(db: AsyncSession = Depends(get_db)):
     """
     Calcula y retorna los animales actualmente bajo tiempo de retiro farmacológico activo,
-    indicando fecha estimada de faenado permitido y días restantes.
+    filtrando directamente en PostgreSQL para evitar escaneos históricos en memoria.
     """
     now = datetime.now(timezone.utc)
 
@@ -364,6 +369,11 @@ async def list_alertas_retiro(db: AsyncSession = Depends(get_db)):
             SanidadTratamiento.deleted_at.is_(None),
             SanidadTratamiento.tiempo_retiro_dias > 0,
             SanidadTratamiento.animal_id.is_not(None),
+            (
+                SanidadTratamiento.fecha_tratamiento
+                + func.make_interval(0, 0, 0, SanidadTratamiento.tiempo_retiro_dias)
+            )
+            > func.clock_timestamp(),
         )
         .order_by(SanidadTratamiento.fecha_tratamiento.desc())
     )

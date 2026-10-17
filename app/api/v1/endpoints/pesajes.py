@@ -118,6 +118,9 @@ def _construir_respuesta_vision(
     )
 
 
+MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
+
+
 @router.post(
     "/vision",
     response_model=PesajeVisionResponse,
@@ -138,12 +141,27 @@ async def estimar_peso_vision(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pixels_per_cm debe estar en (1, 100].")
 
     model = _obtener_modelo(request)
-    contenido = await file.read()
+    contenido = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
+    if not contenido:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo de imagen está vacío.")
+    if len(contenido) > MAX_IMAGE_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="La imagen supera el tamaño máximo permitido (15 MB).",
+        )
+
+    yolo_lock: Optional[asyncio.Lock] = getattr(request.app.state, "yolo_lock", None)
     try:
         img_bgr = await asyncio.to_thread(decodificar_bytes_imagen_sync, contenido)
-        resultado = await asyncio.to_thread(
-            ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
-        )
+        if yolo_lock is not None:
+            async with yolo_lock:
+                resultado = await asyncio.to_thread(
+                    ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
+                )
+        else:
+            resultado = await asyncio.to_thread(
+                ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
+            )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
@@ -166,11 +184,16 @@ async def estimar_peso_camara_rtsp(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> PesajeVisionResponse:
-    rtsp_url = payload.rtsp_url or os.getenv("V380_RTSP_URL")
+    rtsp_url = (payload.rtsp_url or os.getenv("V380_RTSP_URL") or "").strip()
     if not rtsp_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se indicó rtsp_url ni está definida la variable de entorno V380_RTSP_URL.",
+        )
+    if not rtsp_url.lower().startswith(("rtsp://", "rtsps://", "http://", "https://")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La URL de la cámara debe usar el protocolo rtsp:// o http://.",
         )
 
     model = _obtener_modelo(request)
@@ -179,15 +202,27 @@ async def estimar_peso_camara_rtsp(
     except (ConnectionError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
 
+    yolo_lock: Optional[asyncio.Lock] = getattr(request.app.state, "yolo_lock", None)
     try:
-        resultado = await asyncio.to_thread(
-            ejecutar_inferencia_morfometrica_sync,
-            model,
-            frame_bgr,
-            payload.pixels_per_cm,
-            0.45,
-            payload.validar_bordes,
-        )
+        if yolo_lock is not None:
+            async with yolo_lock:
+                resultado = await asyncio.to_thread(
+                    ejecutar_inferencia_morfometrica_sync,
+                    model,
+                    frame_bgr,
+                    payload.pixels_per_cm,
+                    0.45,
+                    payload.validar_bordes,
+                )
+        else:
+            resultado = await asyncio.to_thread(
+                ejecutar_inferencia_morfometrica_sync,
+                model,
+                frame_bgr,
+                payload.pixels_per_cm,
+                0.45,
+                payload.validar_bordes,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
@@ -333,7 +368,7 @@ async def get_pesajes_by_animal(
 
     query = (
         select(RegistroPeso)
-        .options(selectinload(RegistroPeso.animal), selectinload(RegistroPeso.corral))
+        .options(selectinload(RegistroPeso.corral))
         .where(RegistroPeso.id_cerdo == animal_id)
         .order_by(desc(RegistroPeso.tiempo))
     )
@@ -363,8 +398,8 @@ async def get_pesajes_by_animal(
                 foto_evidencia_url=reg.foto_evidencia_url,
                 sync_status=reg.sync_status,
                 created_at=reg.created_at,
-                cerdo_alias=reg.animal.nombre_alias if reg.animal else None,
-                cerdo_arete=reg.animal.codigo_arete if reg.animal else None,
+                cerdo_alias=animal.nombre_alias,
+                cerdo_arete=animal.codigo_arete,
                 corral_codigo=reg.corral.codigo if reg.corral else None,
             )
         )

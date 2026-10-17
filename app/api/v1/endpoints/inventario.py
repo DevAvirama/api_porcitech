@@ -320,6 +320,23 @@ async def register_movimiento(
         )
 
     target_lote_id = mov_in.lote_id or mov_in.lote_inventario_id
+    lote: Optional[InventarioLote] = None
+    if target_lote_id:
+        query_lote = (
+            select(InventarioLote)
+            .where(
+                InventarioLote.id == target_lote_id,
+                InventarioLote.item_id == item.id,
+                InventarioLote.deleted_at.is_(None),
+            )
+            .with_for_update(of=InventarioLote)
+        )
+        lote = (await db.execute(query_lote)).scalar_one_or_none()
+        if not lote:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Lote con id '{target_lote_id}' no encontrado para el insumo '{item.nombre}'",
+            )
 
     costo_unit = Decimal(str(mov_in.costo_unitario)) if mov_in.costo_unitario is not None else item.costo_unitario
     cantidad_dec = Decimal(str(mov_in.cantidad))
@@ -327,13 +344,22 @@ async def register_movimiento(
 
     if mov_in.tipo_movimiento in ("entrada_compra", "devolucion"):
         item.stock_actual += cantidad_dec
+        if lote is not None:
+            lote.cantidad_disponible += cantidad_dec
     elif mov_in.tipo_movimiento in ("salida_consumo", "ajuste_merma"):
         if item.stock_actual < cantidad_dec:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Stock insuficiente para '{item.nombre}'. Disponible: {item.stock_actual} {item.unidad_medida}, Solicitado: {cantidad_dec}",
             )
+        if lote is not None and lote.cantidad_disponible < cantidad_dec:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Stock insuficiente en el lote '{lote.numero_lote}'. Disponible: {lote.cantidad_disponible}, Solicitado: {cantidad_dec}",
+            )
         item.stock_actual -= cantidad_dec
+        if lote is not None:
+            lote.cantidad_disponible -= cantidad_dec
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 from sqlalchemy import (
+    Computed,
     Date,
     DateTime,
     ForeignKey,
@@ -64,8 +65,8 @@ class ReproduccionServicio(Base):
     fecha_servicio: Mapped[date] = mapped_column(Date, nullable=False)
     fecha_probable_parto: Mapped[Optional[date]] = mapped_column(
         Date,
+        Computed("(fecha_servicio + '114 days'::interval)", persisted=True),
         nullable=True,
-        server_default=func.now(),
     )
     estado_confirmacion: Mapped[str] = mapped_column(String(30), nullable=False, default="pendiente")
     fecha_diagnostico: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
@@ -102,11 +103,11 @@ class ReproduccionParto(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
-    servicio_id: Mapped[uuid.UUID] = mapped_column(
+    servicio_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("reproduccion_servicios.id", ondelete="CASCADE"),
         unique=True,
-        nullable=False,
+        nullable=True,
     )
     hembra_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -168,11 +169,11 @@ class ReproduccionDestete(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
-    parto_id: Mapped[uuid.UUID] = mapped_column(
+    parto_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("reproduccion_partos.id", ondelete="CASCADE"),
         unique=True,
-        nullable=False,
+        nullable=True,
     )
     hembra_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),

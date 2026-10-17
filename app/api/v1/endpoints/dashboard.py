@@ -46,12 +46,13 @@ async def get_dashboard_kpis(
             WHERE activo = true AND deleted_at IS NULL
         ),
         serie_pesos AS (
-            SELECT cagg.dia_bucket,
-                   cagg.corral_id,
-                   cagg.peso_promedio_kg,
-                   lag(cagg.peso_promedio_kg) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS peso_anterior_kg,
-                   lag(cagg.dia_bucket) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS fecha_anterior
-            FROM cagg_pesos_diarios_corral cagg
+            SELECT date_trunc('day', rp.tiempo) AS dia_bucket,
+                   rp.corral_id,
+                   AVG(rp.peso_kg) AS peso_promedio_kg,
+                   LAG(AVG(rp.peso_kg)) OVER (PARTITION BY rp.corral_id ORDER BY date_trunc('day', rp.tiempo)) AS peso_anterior_kg,
+                   LAG(date_trunc('day', rp.tiempo)) OVER (PARTITION BY rp.corral_id ORDER BY date_trunc('day', rp.tiempo)) AS fecha_anterior
+            FROM registro_pesos rp
+            GROUP BY date_trunc('day', rp.tiempo), rp.corral_id
         ),
         calculos_gmd AS (
             SELECT 
@@ -132,7 +133,12 @@ async def get_dashboard_kpis(
         "gestacion": 0,
     }
     for fe in filas_etapas:
-        distribucion_etapas[str(fe["estado"])] = int(fe["cantidad"])
+        est = str(fe["estado"])
+        cant = int(fe["cantidad"])
+        if est == "lactante":
+            distribucion_etapas["maternidad"] = distribucion_etapas.get("maternidad", 0) + cant
+        else:
+            distribucion_etapas[est] = cant
 
     return DashboardKPIsResponse(
         total_animales=total_animales,

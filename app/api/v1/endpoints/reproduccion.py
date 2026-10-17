@@ -129,7 +129,6 @@ async def create_servicio(
     )
     db.add(nuevo_servicio)
     await db.commit()
-    await db.refresh(nuevo_servicio)
 
     # Recargar con relaciones y columna generada por PostgreSQL
     stmt = select(ReproduccionServicio).where(ReproduccionServicio.id == nuevo_servicio.id)
@@ -362,7 +361,6 @@ async def create_parto(
     )
     db.add(nuevo_parto)
     await db.commit()
-    await db.refresh(nuevo_parto)
 
     # Recargar con relaciones
     stmt = select(ReproduccionParto).where(ReproduccionParto.id == nuevo_parto.id)
@@ -516,7 +514,6 @@ async def create_destete(
     )
     db.add(nuevo_destete)
     await db.commit()
-    await db.refresh(nuevo_destete)
 
     # Recargar con relaciones
     stmt = select(ReproduccionDestete).where(ReproduccionDestete.id == nuevo_destete.id)

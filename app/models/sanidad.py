@@ -102,12 +102,12 @@ class EjecucionBioseguridad(Base):
         ForeignKey("usuarios.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    fecha_ejecucion: Mapped[datetime] = mapped_column(
+    fecha_registro: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.clock_timestamp(),
     )
-    cumplido: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    estado: Mapped[str] = mapped_column(String(50), nullable=False, default="completado")
     observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     id_local: Mapped[Optional[uuid.UUID]] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     sync_status: Mapped[str] = mapped_column(
@@ -120,17 +120,22 @@ class EjecucionBioseguridad(Base):
         nullable=False,
         server_default=func.clock_timestamp(),
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.clock_timestamp(),
-        onupdate=func.clock_timestamp(),
-    )
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     protocolo: Mapped[Optional["ProtocoloBioseguridad"]] = relationship("ProtocoloBioseguridad", back_populates="ejecuciones", lazy="joined")
     operario: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
     corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")
+
+    @property
+    def fecha_ejecucion(self) -> datetime:
+        return self.fecha_registro
+
+    @property
+    def cumplido(self) -> bool:
+        return (self.estado or "").lower() in ("completado", "cumplido", "true", "1")
+
+    @cumplido.setter
+    def cumplido(self, value: bool) -> None:
+        self.estado = "completado" if value else "pendiente"
 
 
 class SanidadTratamiento(Base):
