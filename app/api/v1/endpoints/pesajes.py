@@ -1,9 +1,12 @@
+import asyncio
+import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, func, select, text
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -12,9 +15,229 @@ from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
 from app.models.user import Usuario
-from app.schemas.pesaje import GMDDiariaItem, PesajeManualCreate, PesajeResponse
+from app.schemas.pesaje import (
+    GMDDiariaItem,
+    PesajeCamaraRTSPRequest,
+    PesajeDeleteResponse,
+    PesajeManualCreate,
+    PesajeResponse,
+    PesajeVisionResponse,
+)
+from app.vision.pipeline import (
+    PESO_MAXIMO_FISIOLOGICO_KG,
+    decodificar_bytes_imagen_sync,
+    ejecutar_inferencia_morfometrica_sync,
+)
+from app.vision.rtsp_client import capturar_fotograma_v380_sync
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Utilidades internas de visión artificial
+# ---------------------------------------------------------------------------
+def _obtener_modelo(request: Request) -> Any:
+    model = getattr(request.app.state, "model", None) or getattr(request.app.state, "yolo_model", None)
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El modelo YOLO no está cargado en el servidor (modo contingencia).",
+        )
+    return model
+
+
+async def _persistir_pesaje_vision(
+    db: AsyncSession,
+    id_cerdo: uuid.UUID,
+    corral_id: Optional[uuid.UUID],
+    resultado: Dict[str, Any],
+) -> Dict[str, Any]:
+    peso = float(resultado["peso_estimado_kg"])
+    if peso <= 0 or peso > PESO_MAXIMO_FISIOLOGICO_KG:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Peso estimado fuera de rango fisiológico ({peso} kg). No se persistió. "
+                "Revise el factor de calibración pixels_per_cm o la altura de la cámara."
+            ),
+        )
+
+    animal = await db.get(Animal, id_cerdo)
+    if not animal or animal.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No se encontró el animal con ID {id_cerdo}.")
+
+    target_corral_id = corral_id or animal.corral_id
+    corral = await db.get(Corral, target_corral_id) if target_corral_id else None
+    if not corral or corral.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No se encontró el corral con ID {target_corral_id}.")
+
+    tiempo = datetime.now(timezone.utc)
+    nuevo_id = uuid.uuid4()
+    db.add(
+        RegistroPeso(
+            tiempo=tiempo,
+            id_registro=nuevo_id,
+            id_cerdo=id_cerdo,
+            corral_id=target_corral_id,
+            peso_kg=peso,
+            metodo="vision_ai",
+            confianza_ia=resultado["confianza"],
+            area_cm2=resultado["area_cm2"],
+            largo_cm=resultado["largo_cm"],
+            ancho_cm=resultado["ancho_cm"],
+            bbox=resultado["bbox"],
+            sync_status="synced",
+        )
+    )
+    animal.peso_actual_kg = Decimal(str(round(peso, 2)))
+    animal.updated_at = func.clock_timestamp()
+    await db.commit()
+    return {"id_registro": nuevo_id, "tiempo": tiempo, "peso_actual_kg": round(peso, 2)}
+
+
+def _construir_respuesta_vision(
+    resultado: Dict[str, Any], fuente: str, persistencia: Optional[Dict[str, Any]]
+) -> PesajeVisionResponse:
+    return PesajeVisionResponse(
+        detectado=True,
+        fuente=fuente,
+        peso_estimado_kg=resultado["peso_estimado_kg"],
+        confianza=resultado["confianza"],
+        area_cm2=resultado["area_cm2"],
+        largo_cm=resultado["largo_cm"],
+        ancho_cm=resultado["ancho_cm"],
+        bbox=resultado["bbox"],
+        imagen_anotada_base64=resultado["imagen_anotada_base64"],
+        persistido=persistencia is not None,
+        id_registro_persistido=persistencia["id_registro"] if persistencia else None,
+        tiempo_registro=persistencia["tiempo"] if persistencia else None,
+        peso_actual_kg=persistencia["peso_actual_kg"] if persistencia else None,
+        mensaje="Detección dorsal y pesaje morfométrico exitoso.",
+    )
+
+
+@router.post(
+    "/vision",
+    response_model=PesajeVisionResponse,
+    summary="Estimar peso desde fotografía (UploadFile)",
+    description="Decodifica la imagen en RAM, ejecuta YOLO con escala normalizada a 1280 px y persiste en registro_pesos.",
+)
+async def estimar_peso_vision(
+    request: Request,
+    file: UploadFile = File(..., description="Fotografía cenital / dorsal del cerdo"),
+    id_cerdo: Optional[uuid.UUID] = Form(None),
+    corral_id: Optional[uuid.UUID] = Form(None),
+    pixels_per_cm: Optional[float] = Form(None),
+    persistir: bool = Form(True),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+) -> PesajeVisionResponse:
+    if pixels_per_cm is not None and not (1.0 < pixels_per_cm <= 100.0):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pixels_per_cm debe estar en (1, 100].")
+
+    model = _obtener_modelo(request)
+    contenido = await file.read()
+    try:
+        img_bgr = await asyncio.to_thread(decodificar_bytes_imagen_sync, contenido)
+        resultado = await asyncio.to_thread(
+            ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    persistencia = None
+    if persistir and id_cerdo:
+        persistencia = await _persistir_pesaje_vision(db, id_cerdo, corral_id, resultado)
+
+    return _construir_respuesta_vision(resultado, "archivo", persistencia)
+
+
+@router.post(
+    "/camara-rtsp",
+    response_model=PesajeVisionResponse,
+    summary="Capturar y estimar peso desde cámara cenital V380 Pro (RTSP/TCP)",
+    description="Drena el buffer RTSP, captura el fotograma en vivo y ejecuta la inferencia sin bloquear el event loop.",
+)
+async def estimar_peso_camara_rtsp(
+    request: Request,
+    payload: PesajeCamaraRTSPRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+) -> PesajeVisionResponse:
+    rtsp_url = payload.rtsp_url or os.getenv("V380_RTSP_URL")
+    if not rtsp_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se indicó rtsp_url ni está definida la variable de entorno V380_RTSP_URL.",
+        )
+
+    model = _obtener_modelo(request)
+    try:
+        frame_bgr = await asyncio.to_thread(capturar_fotograma_v380_sync, rtsp_url)
+    except (ConnectionError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+    try:
+        resultado = await asyncio.to_thread(
+            ejecutar_inferencia_morfometrica_sync,
+            model,
+            frame_bgr,
+            payload.pixels_per_cm,
+            0.45,
+            payload.validar_bordes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    persistencia = None
+    if payload.persistir:
+        persistencia = await _persistir_pesaje_vision(db, payload.id_cerdo, payload.corral_id, resultado)
+
+    return _construir_respuesta_vision(resultado, "camara_rtsp", persistencia)
+
+
+@router.delete(
+    "/{id_registro}",
+    response_model=PesajeDeleteResponse,
+    summary="Anular un pesaje anómalo",
+    description="Elimina la fila de registro_pesos y recalcula animales.peso_actual_kg con el pesaje restante más reciente.",
+)
+async def delete_pesaje(
+    id_registro: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+) -> PesajeDeleteResponse:
+    result = await db.execute(select(RegistroPeso).where(RegistroPeso.id_registro == id_registro).limit(1))
+    pesaje = result.scalars().first()
+    if not pesaje:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No existe el pesaje {id_registro}.")
+
+    id_cerdo = pesaje.id_cerdo
+    await db.execute(delete(RegistroPeso).where(RegistroPeso.id_registro == id_registro))
+
+    ultimo = await db.execute(
+        select(RegistroPeso.peso_kg)
+        .where(RegistroPeso.id_cerdo == id_cerdo)
+        .order_by(desc(RegistroPeso.tiempo))
+        .limit(1)
+    )
+    peso_restante = ultimo.scalar_one_or_none()
+    nuevo_peso = round(float(peso_restante), 2) if peso_restante is not None else 0.00
+
+    animal = await db.get(Animal, id_cerdo)
+    if animal:
+        animal.peso_actual_kg = Decimal(str(nuevo_peso))
+        animal.updated_at = func.clock_timestamp()
+
+    await db.commit()
+    return PesajeDeleteResponse(
+        id_registro=id_registro,
+        id_cerdo=id_cerdo,
+        peso_actual_kg=nuevo_peso,
+        mensaje="Pesaje anulado y peso actual recalculado.",
+    )
 
 
 @router.post(

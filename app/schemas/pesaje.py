@@ -22,6 +22,40 @@ class InferenciaVisionResponse(BaseModel):
     mensaje: Optional[str] = Field(None, description="Mensaje explicativo o estado de inferencia")
     id_registro_persistido: Optional[UUID] = Field(None, description="UUID del registro generado en TimescaleDB si persistió")
     tiempo_registro: Optional[datetime] = Field(None, description="Marca de tiempo asignada al pesaje")
+    imagen_anotada_base64: Optional[str] = Field(None, description="Imagen de evidencia anotada (data URI JPEG)")
+
+
+class PesajeCamaraRTSPRequest(BaseModel):
+    id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
+    corral_id: UUID = Field(..., description="UUID del corral del cerdo")
+    rtsp_url: Optional[str] = Field(None, description="URL RTSP de la cámara V380 Pro (por omisión V380_RTSP_URL)")
+    pixels_per_cm: Optional[float] = None
+    validar_bordes: bool = False
+    persistir: bool = True
+
+
+class PesajeVisionResponse(BaseModel):
+    detectado: bool = True
+    fuente: str = Field(..., description="'archivo' o 'camara_rtsp'")
+    peso_estimado_kg: float
+    confianza: float
+    area_cm2: float
+    largo_cm: float
+    ancho_cm: float
+    bbox: Optional[Dict[str, Any]] = None
+    imagen_anotada_base64: Optional[str] = None
+    persistido: bool = False
+    id_registro_persistido: Optional[UUID] = None
+    tiempo_registro: Optional[datetime] = None
+    peso_actual_kg: Optional[float] = None
+    mensaje: Optional[str] = None
+
+
+class PesajeDeleteResponse(BaseModel):
+    id_registro: UUID
+    id_cerdo: UUID
+    peso_actual_kg: float
+    mensaje: str
 
 
 class PesajeManualCreate(BaseModel):

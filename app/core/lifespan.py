@@ -27,6 +27,17 @@ async def lifespan(app: FastAPI):
             # Se instancia UNA SOLA VEZ en memoria global de la app
             app.state.yolo_model = YOLO(resolved_weights)
             logger.info("✅ Modelo YOLO dorsal cargado exitosamente en app.state.yolo_model")
+
+            # Warmup ligero: inicializa grafos/kernels para que la primera petición no pague la latencia
+            try:
+                import numpy as np
+
+                app.state.yolo_model.predict(
+                    source=np.zeros((640, 640, 3), dtype=np.uint8), verbose=False
+                )
+                logger.info("🔥 Warmup YOLO completado (640x640).")
+            except Exception as warm_exc:
+                logger.warning(f"⚠️ Warmup YOLO omitido: {warm_exc}")
         except Exception as exc:
             logger.warning(
                 f"⚠️ Advertencia: No se pudo cargar el modelo YOLO desde {resolved_weights}: {exc}. "
@@ -40,6 +51,9 @@ async def lifespan(app: FastAPI):
         )
         app.state.yolo_model = None
 
+    # Alias canónico: misma instancia (no se recarga el modelo)
+    app.state.model = app.state.yolo_model
+
     yield
 
     # --- FASE DE APAGADO (SHUTDOWN) ---
@@ -48,6 +62,7 @@ async def lifespan(app: FastAPI):
     # Liberación de memoria del modelo
     if hasattr(app.state, "yolo_model"):
         app.state.yolo_model = None
+    app.state.model = None
     
     # Cierre de conexiones a PostgreSQL / TimescaleDB
     await engine.dispose()

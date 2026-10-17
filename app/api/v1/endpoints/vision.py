@@ -13,7 +13,7 @@ from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
 from app.schemas.pesaje import BoundingBoxSchema, InferenciaVisionResponse
-from app.vision.pipeline import decode_image, process_pig_frame
+from app.vision.pipeline import PESO_MAXIMO_FISIOLOGICO_KG, decode_image, process_pig_frame
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,12 @@ async def estimate_weight(
     tiempo_registro: Optional[datetime] = None
 
     # 5. Persistencia condicional en TimescaleDB e hipertabla registro_pesos
+    if persistir and id_cerdo and not (0 < resultado["peso_kg"] <= PESO_MAXIMO_FISIOLOGICO_KG):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Peso estimado fuera de rango fisiológico ({resultado['peso_kg']} kg). No se persistió; revise la calibración.",
+        )
+
     if persistir and id_cerdo:
         animal = await db.get(Animal, id_cerdo)
         if not animal:
@@ -138,5 +144,6 @@ async def estimate_weight(
         bbox=BoundingBoxSchema(**resultado["bbox"]) if resultado.get("bbox") else None,
         id_registro_persistido=id_registro_persistido,
         tiempo_registro=tiempo_registro,
+        imagen_anotada_base64=resultado.get("imagen_anotada_base64"),
         mensaje=resultado.get("mensaje", "Detección dorsal y pesaje morfométrico exitoso."),
     )

@@ -45,4 +45,5 @@ htmlcov/
 # Weights & Temporary Files
 weights/*.pt
 !weights/.gitkeep
+!weights/best.pt
 scratch/
