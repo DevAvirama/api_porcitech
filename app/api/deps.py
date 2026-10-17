@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import AsyncGenerator, Callable, List, Optional
 from fastapi import Depends, HTTPException, status
@@ -5,9 +6,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import decode_access_token
 from app.db.session import get_db
 from app.models.user import Usuario
+
+logger = logging.getLogger(__name__)
 
 # Esquema de autenticación Bearer para tokens JWT en cabeceras HTTP
 security_scheme = HTTPBearer(auto_error=True)
@@ -130,10 +134,52 @@ async def get_current_user_optional(
     return None
 
 
+async def resolve_user_or_fallback(
+    db: AsyncSession,
+    current_user: Optional[Usuario] = None,
+    role: Optional[str] = None,
+) -> uuid.UUID:
+    """
+    Resuelve el UUID del usuario para transacciones de auditoría.
+    Si hay usuario autenticado vía JWT, devuelve su ID de forma prioritaria.
+    Si la petición carece de cabecera de autenticación (pruebas locales o contingencia):
+    - En modo producción (ENVIRONMENT == "production"): Arroja HTTP 401 Unauthorized estricto.
+    - En modo desarrollo/pruebas: Busca el primer usuario activo en la BD con el rol indicado
+      para salvaguardar la integridad referencial sin interrumpir las operaciones.
+    """
+    if current_user and current_user.id:
+        return current_user.id
+
+    if settings.ENVIRONMENT.lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Autenticación requerida. No se permite fallback anónimo en entorno de producción.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    logger.warning(
+        "Aviso de seguridad [DEV]: Petición sin token JWT resuelta con usuario fallback para rol=%s",
+        role or "cualquiera",
+    )
+
+    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
+    if role:
+        query = query.where(Usuario.rol == role)
+
+    result = await db.execute(query.limit(1))
+    user_id = result.scalar_one_or_none()
+    if user_id:
+        return user_id
+
+    # Fallback ID semilla (admin general)
+    return uuid.UUID("b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22")
+
+
 __all__ = [
     "get_db",
     "get_current_user",
     "get_current_user_optional",
+    "resolve_user_or_fallback",
     "require_roles",
     "security_scheme",
     "optional_security_scheme",

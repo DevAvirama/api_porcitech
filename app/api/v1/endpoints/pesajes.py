@@ -319,6 +319,8 @@ async def create_pesaje_manual(
 )
 async def get_pesajes_by_animal(
     animal_id: uuid.UUID,
+    limit: Optional[int] = Query(100, ge=1, le=500, description="Número máximo de registros a retornar"),
+    offset: int = Query(0, ge=0, description="Desplazamiento para paginación"),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> List[PesajeResponse]:
@@ -335,6 +337,11 @@ async def get_pesajes_by_animal(
         .where(RegistroPeso.id_cerdo == animal_id)
         .order_by(desc(RegistroPeso.tiempo))
     )
+    if isinstance(limit, int):
+        query = query.limit(limit)
+    if isinstance(offset, int) and offset > 0:
+        query = query.offset(offset)
+
     result = await db.execute(query)
     registros = result.scalars().all()
 

@@ -26,6 +26,8 @@ async def list_animales(
     corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral asignado"),
     estado: Optional[str] = Query(None, description="Filtrar por estado o etapa productiva"),
     sexo: Optional[str] = Query(None, description="Filtrar por sexo: 'macho' o 'hembra'"),
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Límite de registros a retornar"),
+    offset: int = Query(0, ge=0, description="Desplazamiento para paginación"),
     db: AsyncSession = Depends(get_db),
 ) -> List[AnimalResponse]:
     query = (
@@ -34,7 +36,7 @@ async def list_animales(
         .where(Animal.deleted_at.is_(None))
     )
 
-    if search and search.strip():
+    if isinstance(search, str) and search.strip():
         term = f"%{search.strip()}%"
         query = query.where(
             or_(
@@ -45,16 +47,22 @@ async def list_animales(
             )
         )
 
-    if corral_id is not None:
+    if isinstance(corral_id, uuid.UUID):
         query = query.where(Animal.corral_id == corral_id)
 
-    if estado and estado != "all":
+    if isinstance(estado, str) and estado != "all":
         query = query.where(Animal.estado == estado)
 
-    if sexo and sexo != "all":
+    if isinstance(sexo, str) and sexo != "all":
         query = query.where(Animal.sexo == sexo)
 
     query = query.order_by(Animal.created_at.desc(), Animal.codigo_arete.asc())
+
+    if isinstance(limit, int):
+        query = query.limit(limit)
+    if isinstance(offset, int) and offset > 0:
+        query = query.offset(offset)
+
     result = await db.execute(query)
     animales = result.scalars().all()
     return [AnimalResponse.model_validate(a) for a in animales]

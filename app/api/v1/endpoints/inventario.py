@@ -6,7 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.inventario import (
     InventarioCategoria,
     InventarioItem,
@@ -27,17 +27,6 @@ from app.schemas.inventario import (
 router = APIRouter()
 
 
-async def get_fallback_user_id(db: AsyncSession, current_user: Optional[Usuario] = None) -> uuid.UUID:
-    if current_user:
-        return current_user.id
-    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
-    result = await db.execute(query.limit(1))
-    user_id = result.scalar_one_or_none()
-    if user_id:
-        return user_id
-    return uuid.UUID("b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22")
-
-
 @router.get("/categorias", response_model=List[InventarioCategoriaResponse])
 async def list_categorias(db: AsyncSession = Depends(get_db)):
     """
@@ -53,6 +42,8 @@ async def list_items(
     categoria_id: Optional[str] = Query(None, description="Filtrar por categoría (UUID)"),
     search: Optional[str] = Query(None, description="Búsqueda por nombre o SKU"),
     bajo_stock: Optional[Union[bool, str]] = Query(None, description="Filtrar insumos bajo stock mínimo"),
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Límite de registros a retornar"),
+    offset: int = Query(0, ge=0, description="Desplazamiento para paginación"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -73,7 +64,7 @@ async def list_items(
         except (ValueError, TypeError):
             pass
 
-    if search and search.strip():
+    if isinstance(search, str) and search.strip():
         term = f"%{search.strip()}%"
         query = query.where(
             or_(
@@ -90,6 +81,11 @@ async def list_items(
             is_bajo = True
         if is_bajo:
             query = query.where(InventarioItem.stock_actual <= InventarioItem.stock_minimo)
+
+    if isinstance(limit, int):
+        query = query.limit(limit)
+    if isinstance(offset, int) and offset > 0:
+        query = query.offset(offset)
 
     result = await db.execute(query)
     items = result.scalars().all()
@@ -344,7 +340,7 @@ async def register_movimiento(
             detail=f"Tipo de movimiento no válido: '{mov_in.tipo_movimiento}'. Debe ser: entrada_compra, salida_consumo, ajuste_merma o devolucion",
         )
 
-    user_id = await get_fallback_user_id(db, current_user)
+    user_id = await resolve_user_or_fallback(db, current_user)
 
     nuevo_movimiento = MovimientoInventario(
         item_id=item.id,

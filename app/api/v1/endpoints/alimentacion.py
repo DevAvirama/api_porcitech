@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.alimentacion import AlimentacionRacion
 from app.models.corral import Corral
 from app.models.inventario import InventarioItem, MovimientoInventario
@@ -17,22 +17,6 @@ from app.schemas.alimentacion import (
 )
 
 router = APIRouter()
-
-
-async def get_fallback_user_id(
-    db: AsyncSession, current_user: Optional[Usuario] = None, role: Optional[str] = None
-) -> uuid.UUID:
-    if current_user:
-        return current_user.id
-    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
-    if role:
-        query = query.where(Usuario.rol == role)
-    result = await db.execute(query.limit(1))
-    user_id = result.scalar_one_or_none()
-    if user_id:
-        return user_id
-    # Fallback operario seed
-    return uuid.UUID("b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24")
 
 
 @router.get("/raciones", response_model=List[AlimentacionRacionResponse])
@@ -134,7 +118,7 @@ async def register_racion(
     item.stock_actual -= cant_dec
     costo_total = item.costo_unitario * cant_dec
 
-    operario_id = await get_fallback_user_id(db, current_user, role="operario")
+    operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
 
     # Registrar salida en Kardex
     mov_kardex = MovimientoInventario(

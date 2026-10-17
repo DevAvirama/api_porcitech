@@ -28,19 +28,89 @@ async def get_dashboard_kpis(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> DashboardKPIsResponse:
-    # 1. Total de animales activos y peso promedio actual de la granja
-    query_animales = text(
+    # 1. Ejecutar métricas consolidadas en una sola consulta CTE (reduce 6 round-trips a 1)
+    query_kpis = text(
         """
+        WITH metricas_animales AS (
+            SELECT 
+                COUNT(*) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS total_activos,
+                COALESCE(AVG(peso_actual_kg) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido') AND peso_actual_kg > 0), 0) AS peso_promedio,
+                COUNT(*) FILTER (WHERE corral_id IS NOT NULL AND deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS asignados
+            FROM animales
+        ),
+        metricas_corrales AS (
+            SELECT 
+                COUNT(*) AS total_activos,
+                COALESCE(SUM(capacidad_maxima), 0) AS capacidad_total
+            FROM corrales 
+            WHERE activo = true AND deleted_at IS NULL
+        ),
+        serie_pesos AS (
+            SELECT cagg.dia_bucket,
+                   cagg.corral_id,
+                   cagg.peso_promedio_kg,
+                   lag(cagg.peso_promedio_kg) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS peso_anterior_kg,
+                   lag(cagg.dia_bucket) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS fecha_anterior
+            FROM cagg_pesos_diarios_corral cagg
+        ),
+        calculos_gmd AS (
+            SELECT 
+                ROUND(((peso_promedio_kg - peso_anterior_kg) / NULLIF(EXTRACT(epoch FROM (dia_bucket - fecha_anterior)) / 86400, 0))::numeric, 2) AS gmd_diaria
+            FROM serie_pesos
+            WHERE peso_anterior_kg IS NOT NULL
+        ),
+        metrica_gmd AS (
+            SELECT COALESCE(
+                AVG(gmd_diaria) FILTER (WHERE gmd_diaria > 0 AND gmd_diaria <= 2.0),
+                0.81
+            ) AS gmd_promedio
+            FROM calculos_gmd
+        ),
+        metrica_sanidad AS (
+            SELECT COUNT(*) AS alertas_sanitarias
+            FROM sanidad_tratamientos 
+            WHERE deleted_at IS NULL 
+              AND (fecha_tratamiento + (tiempo_retiro_dias || ' days')::interval) > clock_timestamp()
+        ),
+        metrica_inventario AS (
+            SELECT COUNT(*) AS alertas_stock
+            FROM inventario_items 
+            WHERE deleted_at IS NULL AND stock_actual <= stock_minimo
+        )
         SELECT 
-            COUNT(*) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS total_activos,
-            COALESCE(AVG(peso_actual_kg) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido') AND peso_actual_kg > 0), 0) AS peso_promedio
-        FROM animales;
+            a.total_activos,
+            a.peso_promedio,
+            a.asignados,
+            c.total_activos AS total_corrales,
+            c.capacidad_total,
+            g.gmd_promedio,
+            s.alertas_sanitarias,
+            i.alertas_stock
+        FROM metricas_animales a
+        CROSS JOIN metricas_corrales c
+        CROSS JOIN metrica_gmd g
+        CROSS JOIN metrica_sanidad s
+        CROSS JOIN metrica_inventario i;
         """
     )
-    res_animales = await db.execute(query_animales)
-    row_animales = res_animales.mappings().first()
-    total_animales = int(row_animales["total_activos"] or 0)
-    peso_promedio_granja_kg = round(float(row_animales["peso_promedio"] or 0.0), 2)
+    res_kpis = await db.execute(query_kpis)
+    kpis = res_kpis.mappings().first() or {}
+
+    total_animales = int(kpis.get("total_activos") or 0)
+    peso_promedio_granja_kg = round(float(kpis.get("peso_promedio") or 0.0), 2)
+    total_corrales_activos = int(kpis.get("total_corrales") or 0)
+    capacidad_total = int(kpis.get("capacidad_total") or 0)
+    animales_asignados = int(kpis.get("asignados") or 0)
+    gmd_val = kpis.get("gmd_promedio")
+    gmd_promedio_kg = round(float(gmd_val if gmd_val is not None else 0.81), 2)
+    alertas_sanitarias = int(kpis.get("alertas_sanitarias") or 0)
+    alertas_inventario_stock = int(kpis.get("alertas_stock") or 0)
+
+    tasa_ocupacion_porcentaje = (
+        round((animales_asignados / capacidad_total * 100), 1)
+        if capacidad_total > 0
+        else 0.0
+    )
 
     # 2. Desglose de animales por etapa o estado
     query_etapas = text(
@@ -63,90 +133,6 @@ async def get_dashboard_kpis(
     }
     for fe in filas_etapas:
         distribucion_etapas[str(fe["estado"])] = int(fe["cantidad"])
-
-    # 3. Corrales activos y tasa de ocupación
-    query_corrales = text(
-        """
-        SELECT 
-            COUNT(*) AS total_activos,
-            COALESCE(SUM(capacidad_maxima), 0) AS capacidad_total
-        FROM corrales 
-        WHERE activo = true AND deleted_at IS NULL;
-        """
-    )
-    res_corrales = await db.execute(query_corrales)
-    row_corrales = res_corrales.mappings().first()
-    total_corrales_activos = int(row_corrales["total_activos"] or 0)
-    capacidad_total = int(row_corrales["capacidad_total"] or 0)
-
-    query_asignados = text(
-        """
-        SELECT COUNT(*) AS asignados
-        FROM animales 
-        WHERE corral_id IS NOT NULL 
-          AND deleted_at IS NULL 
-          AND estado NOT IN ('muerto', 'vendido');
-        """
-    )
-    res_asignados = await db.execute(query_asignados)
-    animales_asignados = int(res_asignados.scalar() or 0)
-
-    tasa_ocupacion_porcentaje = (
-        round((animales_asignados / capacidad_total * 100), 1)
-        if capacidad_total > 0
-        else 0.0
-    )
-
-    # 4. GMD promedio general (calculado normalizando ganancia por días transcurridos)
-    query_gmd = text(
-        """
-        WITH serie_pesos AS (
-            SELECT cagg.dia_bucket,
-                   cagg.corral_id,
-                   cagg.peso_promedio_kg,
-                   lag(cagg.peso_promedio_kg) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS peso_anterior_kg,
-                   lag(cagg.dia_bucket) OVER (PARTITION BY cagg.corral_id ORDER BY cagg.dia_bucket) AS fecha_anterior
-            FROM cagg_pesos_diarios_corral cagg
-        ),
-        calculos AS (
-            SELECT 
-                ROUND(((peso_promedio_kg - peso_anterior_kg) / NULLIF(EXTRACT(epoch FROM (dia_bucket - fecha_anterior)) / 86400, 0))::numeric, 2) AS gmd_diaria
-            FROM serie_pesos
-            WHERE peso_anterior_kg IS NOT NULL
-        )
-        SELECT COALESCE(
-            AVG(gmd_diaria) FILTER (WHERE gmd_diaria > 0 AND gmd_diaria <= 2.0),
-            0.81
-        ) AS gmd_promedio
-        FROM calculos;
-        """
-    )
-    res_gmd = await db.execute(query_gmd)
-    gmd_val = res_gmd.scalar()
-    gmd_promedio_kg = round(float(gmd_val if gmd_val is not None else 0.81), 2)
-
-    # 5. Alertas sanitarias (tratamientos con periodo de retiro farmacológico activo)
-    query_alertas_sanitarias = text(
-        """
-        SELECT COUNT(*) 
-        FROM sanidad_tratamientos 
-        WHERE deleted_at IS NULL 
-          AND (fecha_tratamiento + (tiempo_retiro_dias || ' days')::interval) > clock_timestamp();
-        """
-    )
-    res_alertas_sanitarias = await db.execute(query_alertas_sanitarias)
-    alertas_sanitarias = int(res_alertas_sanitarias.scalar() or 0)
-
-    # 6. Alertas de inventario (stock actual menor o igual a stock mínimo)
-    query_alertas_stock = text(
-        """
-        SELECT COUNT(*) 
-        FROM inventario_items 
-        WHERE deleted_at IS NULL AND stock_actual <= stock_minimo;
-        """
-    )
-    res_alertas_stock = await db.execute(query_alertas_stock)
-    alertas_inventario_stock = int(res_alertas_stock.scalar() or 0)
 
     return DashboardKPIsResponse(
         total_animales=total_animales,

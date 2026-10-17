@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.reproduccion import (
@@ -26,22 +26,6 @@ from app.schemas.reproduccion import (
 )
 
 router = APIRouter()
-
-
-async def get_fallback_user_id(
-    db: AsyncSession, current_user: Optional[Usuario] = None, role: Optional[str] = None
-) -> uuid.UUID:
-    if current_user:
-        return current_user.id
-    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
-    if role:
-        query = query.where(Usuario.rol == role)
-    result = await db.execute(query.limit(1))
-    user_id = result.scalar_one_or_none()
-    if user_id:
-        return user_id
-    # Fallback default seed user
-    return uuid.UUID("b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22")
 
 
 # ============================================================================
@@ -130,7 +114,7 @@ async def create_servicio(
                 detail=f"Macho con id '{body.macho_id}' no encontrado",
             )
 
-    tecnico_id = await get_fallback_user_id(db, current_user, role="veterinario")
+    tecnico_id = await resolve_user_or_fallback(db, current_user, role="veterinario")
 
     nuevo_servicio = ReproduccionServicio(
         hembra_id=body.hembra_id,
@@ -360,7 +344,7 @@ async def create_parto(
                 detail=f"Corral con id '{body.corral_maternidad_id}' no encontrado",
             )
 
-    atendido_id = await get_fallback_user_id(db, current_user, role="veterinario")
+    atendido_id = await resolve_user_or_fallback(db, current_user, role="veterinario")
     fecha_parto_dt = body.fecha_parto or datetime.now(timezone.utc)
 
     nuevo_parto = ReproduccionParto(
@@ -517,7 +501,7 @@ async def create_destete(
             diff_days = (fecha_des - parto_date).days
             calculated_lactancia = max(0, diff_days)
 
-    operario_id = await get_fallback_user_id(db, current_user, role="operario")
+    operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
 
     nuevo_destete = ReproduccionDestete(
         parto_id=body.parto_id,

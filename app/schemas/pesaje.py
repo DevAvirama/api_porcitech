@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BoundingBoxSchema(BaseModel):
@@ -38,6 +38,7 @@ class PesajeVisionResponse(BaseModel):
     detectado: bool = True
     fuente: str = Field(..., description="'archivo' o 'camara_rtsp'")
     peso_estimado_kg: float
+    peso_estimado: Optional[float] = None
     confianza: float
     area_cm2: float
     largo_cm: float
@@ -49,6 +50,12 @@ class PesajeVisionResponse(BaseModel):
     tiempo_registro: Optional[datetime] = None
     peso_actual_kg: Optional[float] = None
     mensaje: Optional[str] = None
+
+    @model_validator(mode="after")
+    def populate_alias_fields(self):
+        if self.peso_estimado is None:
+            self.peso_estimado = self.peso_estimado_kg
+        return self
 
 
 class PesajeDeleteResponse(BaseModel):

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.inventario import InventarioItem, MovimientoInventario
@@ -27,22 +27,6 @@ from app.schemas.sanidad import (
 )
 
 router = APIRouter()
-
-
-async def get_fallback_user_id(
-    db: AsyncSession, current_user: Optional[Usuario] = None, role: Optional[str] = None
-) -> uuid.UUID:
-    if current_user:
-        return current_user.id
-    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
-    if role:
-        query = query.where(Usuario.rol == role)
-    result = await db.execute(query.limit(1))
-    user_id = result.scalar_one_or_none()
-    if user_id:
-        return user_id
-    # Fallback admin / vet seed
-    return uuid.UUID("b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a23")
 
 
 # ============================================================================
@@ -150,7 +134,7 @@ async def toggle_protocol_execution(
             observaciones=existing_exec.observaciones,
         )
 
-    operario_id = await get_fallback_user_id(db, current_user, role="operario")
+    operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
 
     new_exec = EjecucionBioseguridad(
         protocolo_id=body.protocolo_id,
@@ -268,7 +252,7 @@ async def create_tratamiento(
                 detail=f"Corral con id '{body.corral_id}' no encontrado",
             )
 
-    vet_id = await get_fallback_user_id(db, current_user, role="veterinario")
+    vet_id = await resolve_user_or_fallback(db, current_user, role="veterinario")
 
     # Si se asocia medicamento del inventario, descontar stock de bodega
     if body.medicamento_id and body.dosis and body.dosis > 0:
