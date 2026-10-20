@@ -39,6 +39,8 @@ class SanidadTratamientoCreate(BaseModel):
     animal_id: Optional[UUID] = None
     corral_id: Optional[UUID] = None
     medicamento_id: Optional[UUID] = None
+    lote_inventario_id: Optional[UUID] = None
+    lote_biologico: Optional[str] = None
     tipo_evento: str = Field(..., description="'vacuna' | 'tratamiento' | 'desparasitacion'")
     producto_nombre: str
     diagnostico: Optional[str] = None
@@ -61,6 +63,8 @@ class SanidadTratamientoResponse(BaseModel):
     veterinario_id: UUID
     veterinario_nombre: Optional[str] = None
     medicamento_id: Optional[UUID] = None
+    lote_inventario_id: Optional[UUID] = None
+    lote_biologico: Optional[str] = None
     tipo_evento: str
     producto_nombre: str
     diagnostico: Optional[str] = None

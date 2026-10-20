@@ -1,13 +1,14 @@
 -- =============================================================================
--- ESQUEMA DDL INTEGRAL Y DATOS SEMILLA - PORCITECH
+-- ESQUEMA DDL INTEGRAL Y HOMOLOGADO - PORCITECH
 -- Sistema Integral Porcino - ADSO SENA
+-- Motor: PostgreSQL 16+ / TimescaleDB
 -- =============================================================================
 
 -- 1. EXTENSIONES
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "timescaledb" CASCADE;
 
--- 2. TIPOS ENUMERADOS (IDEMPOTENTES)
+-- 2. TIPOS ENUMERADOS (CREACIÓN Y EVOLUCIÓN IDEMPOTENTE)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'rol_usuario_enum') THEN
@@ -19,7 +20,11 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'estado_animal_enum') THEN
-        CREATE TYPE estado_animal_enum AS ENUM ('activo', 'lactante', 'precebo', 'levante', 'engorde', 'gestacion', 'cuarentena', 'vendido', 'muerto', 'enfermo');
+        CREATE TYPE estado_animal_enum AS ENUM (
+            'activo', 'lactante', 'precebo', 'levante', 'engorde',
+            'gestacion', 'cuarentena', 'vendido', 'muerto', 'enfermo',
+            'descarte', 'reemplazo'
+        );
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'metodo_pesaje_enum') THEN
@@ -27,17 +32,39 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_fase_corral_enum') THEN
-        CREATE TYPE tipo_fase_corral_enum AS ENUM ('maternidad', 'precebo', 'levante', 'ceba', 'cuarentena', 'gestacion');
+        CREATE TYPE tipo_fase_corral_enum AS ENUM (
+            'maternidad', 'precebo', 'destete', 'levante', 'ceba',
+            'engorde', 'cuarentena', 'gestacion'
+        );
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'estado_sincronizacion_enum') THEN
-        CREATE TYPE estado_sincronizacion_enum AS ENUM ('pending', 'synced', 'conflict', 'error', 'pendiente', 'sincronizado', 'conflicto');
+        CREATE TYPE estado_sincronizacion_enum AS ENUM (
+            'pending', 'synced', 'conflict', 'error',
+            'pendiente', 'sincronizado', 'conflicto'
+        );
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_movimiento_inv_enum') THEN
-        CREATE TYPE tipo_movimiento_inv_enum AS ENUM ('entrada_compra', 'salida_consumo', 'ajuste_merma', 'devolucion');
+        CREATE TYPE tipo_movimiento_inv_enum AS ENUM (
+            'entrada_compra', 'salida_consumo', 'ajuste_merma', 'devolucion'
+        );
     END IF;
 END $$;
+
+-- Garantizar que bases de datos preexistentes reciban los nuevos valores ENUM
+ALTER TYPE estado_animal_enum ADD VALUE IF NOT EXISTS 'enfermo';
+ALTER TYPE estado_animal_enum ADD VALUE IF NOT EXISTS 'descarte';
+ALTER TYPE estado_animal_enum ADD VALUE IF NOT EXISTS 'reemplazo';
+
+ALTER TYPE metodo_pesaje_enum ADD VALUE IF NOT EXISTS 'ia_vision';
+
+ALTER TYPE tipo_fase_corral_enum ADD VALUE IF NOT EXISTS 'destete';
+ALTER TYPE tipo_fase_corral_enum ADD VALUE IF NOT EXISTS 'engorde';
+
+ALTER TYPE estado_sincronizacion_enum ADD VALUE IF NOT EXISTS 'pendiente';
+ALTER TYPE estado_sincronizacion_enum ADD VALUE IF NOT EXISTS 'sincronizado';
+ALTER TYPE estado_sincronizacion_enum ADD VALUE IF NOT EXISTS 'conflicto';
 
 -- 3. FUNCIÓN DE AUDITORÍA (TRIGGERS DE UPDATED_AT)
 CREATE OR REPLACE FUNCTION fn_actualizar_updated_at()
@@ -67,6 +94,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     deleted_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_usuarios_sync ON usuarios (sync_status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_usuarios_email_activo ON usuarios (email) WHERE deleted_at IS NULL;
 
 -- 4.2 Corrales
 CREATE TABLE IF NOT EXISTS corrales (
@@ -85,14 +113,15 @@ CREATE TABLE IF NOT EXISTS corrales (
     deleted_at TIMESTAMPTZ,
     CONSTRAINT chk_fechas_corral CHECK (fecha_cierre IS NULL OR fecha_cierre >= fecha_inicio)
 );
-CREATE INDEX IF NOT EXISTS idx_corrales_fase ON corrales (fase, activo);
+CREATE INDEX IF NOT EXISTS idx_corrales_fase ON corrales (fase, activo) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_corrales_codigo ON corrales (codigo) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_corrales_sync ON corrales (sync_status, updated_at);
 
 -- 4.3 Animales
 CREATE TABLE IF NOT EXISTS animales (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     codigo_arete VARCHAR(50) NOT NULL UNIQUE,
-    codigo_qr VARCHAR(100) UNIQUE,
+    codigo_qr VARCHAR(100) NOT NULL UNIQUE,
     nombre_alias VARCHAR(80),
     sexo sexo_animal_enum NOT NULL,
     raza VARCHAR(60) NOT NULL,
@@ -101,7 +130,7 @@ CREATE TABLE IF NOT EXISTS animales (
     corral_id UUID REFERENCES corrales(id) ON DELETE SET NULL,
     id_padre UUID REFERENCES animales(id) ON DELETE SET NULL,
     id_madre UUID REFERENCES animales(id) ON DELETE SET NULL,
-    peso_actual_kg NUMERIC(6,2) DEFAULT 0.00,
+    peso_actual_kg NUMERIC(6,2) DEFAULT 0.00 CHECK (peso_actual_kg >= 0),
     foto_url TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
@@ -110,7 +139,9 @@ CREATE TABLE IF NOT EXISTS animales (
     deleted_at TIMESTAMPTZ,
     CONSTRAINT chk_genealogia_distinta CHECK (id <> id_padre AND id <> id_madre)
 );
-CREATE INDEX IF NOT EXISTS idx_animales_corral ON animales (corral_id, estado);
+CREATE INDEX IF NOT EXISTS idx_animales_corral ON animales (corral_id, estado) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_animales_arete ON animales (codigo_arete) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_animales_qr ON animales (codigo_qr) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_animales_sync ON animales (sync_status, updated_at);
 
 -- 4.4 Categorías de Inventario
@@ -130,9 +161,10 @@ CREATE TABLE IF NOT EXISTS inventario_items (
     codigo_sku VARCHAR(60) NOT NULL UNIQUE,
     nombre VARCHAR(120) NOT NULL,
     unidad_medida VARCHAR(50) NOT NULL,
+    factor_conversion_kg NUMERIC(8,3) NOT NULL DEFAULT 1.000 CHECK (factor_conversion_kg > 0),
     stock_actual NUMERIC(10,2) NOT NULL DEFAULT 0.00 CHECK (stock_actual >= 0),
     stock_minimo NUMERIC(10,2) NOT NULL DEFAULT 0.00 CHECK (stock_minimo >= 0),
-    costo_unitario NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    costo_unitario NUMERIC(12,2) NOT NULL DEFAULT 0.00 CHECK (costo_unitario >= 0),
     ubicacion_bodega VARCHAR(80),
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
@@ -140,6 +172,7 @@ CREATE TABLE IF NOT EXISTS inventario_items (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     deleted_at TIMESTAMPTZ
 );
+CREATE INDEX IF NOT EXISTS idx_inventario_items_bajo_stock ON inventario_items (stock_actual, stock_minimo) WHERE deleted_at IS NULL;
 
 -- 4.6 Lotes de Inventario
 CREATE TABLE IF NOT EXISTS inventario_lotes (
@@ -148,24 +181,27 @@ CREATE TABLE IF NOT EXISTS inventario_lotes (
     numero_lote VARCHAR(100) NOT NULL,
     fecha_fabricacion DATE,
     fecha_vencimiento DATE,
-    cantidad_inicial NUMERIC(10,2) NOT NULL,
+    cantidad_inicial NUMERIC(10,2) NOT NULL CHECK (cantidad_inicial > 0),
     cantidad_disponible NUMERIC(10,2) NOT NULL DEFAULT 0.00 CHECK (cantidad_disponible >= 0),
-    registro_ica VARCHAR(50),
+    registro_ica VARCHAR(60),
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT chk_fechas_lote_inventario CHECK (
+        fecha_vencimiento IS NULL OR fecha_fabricacion IS NULL OR fecha_vencimiento >= fecha_fabricacion
+    )
 );
 
--- 4.7 Movimientos de Inventario
+-- 4.7 Movimientos de Inventario (Kardex)
 CREATE TABLE IF NOT EXISTS movimientos_inventario (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     item_id UUID NOT NULL REFERENCES inventario_items(id) ON DELETE RESTRICT,
     lote_inventario_id UUID REFERENCES inventario_lotes(id) ON DELETE SET NULL,
     tipo_movimiento tipo_movimiento_inv_enum NOT NULL,
     cantidad NUMERIC(10,2) NOT NULL CHECK (cantidad > 0),
-    costo_unitario NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    costo_unitario NUMERIC(12,2) NOT NULL DEFAULT 0.00 CHECK (costo_unitario >= 0),
     usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
     fecha_movimiento TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     motivo VARCHAR(255),
@@ -206,7 +242,9 @@ CREATE TABLE IF NOT EXISTS ejecucion_bioseguridad (
     observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
 );
 
 -- 4.10 Tratamientos y Sanidad
@@ -216,13 +254,15 @@ CREATE TABLE IF NOT EXISTS sanidad_tratamientos (
     corral_id UUID REFERENCES corrales(id) ON DELETE SET NULL,
     veterinario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
     medicamento_id UUID REFERENCES inventario_items(id) ON DELETE RESTRICT,
+    lote_inventario_id UUID REFERENCES inventario_lotes(id) ON DELETE SET NULL,
+    lote_biologico VARCHAR(100),
     tipo_evento VARCHAR(50) NOT NULL,
     producto_nombre VARCHAR(120) NOT NULL,
     diagnostico VARCHAR(150),
-    dosis NUMERIC(8,2),
+    dosis NUMERIC(8,2) CHECK (dosis IS NULL OR dosis >= 0),
     unidad_dosis VARCHAR(30),
     via_administracion VARCHAR(50),
-    tiempo_retiro_dias INT DEFAULT 0 CHECK (tiempo_retiro_dias >= 0),
+    tiempo_retiro_dias INT NOT NULL DEFAULT 0 CHECK (tiempo_retiro_dias >= 0),
     fecha_tratamiento TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     fecha_proxima_dosis DATE,
     observaciones TEXT,
@@ -230,9 +270,11 @@ CREATE TABLE IF NOT EXISTS sanidad_tratamientos (
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT chk_sanidad_objetivo_valido CHECK (animal_id IS NOT NULL OR corral_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_tratamientos_animal ON sanidad_tratamientos (animal_id, fecha_tratamiento DESC);
+CREATE INDEX IF NOT EXISTS idx_sanidad_retiro_activo ON sanidad_tratamientos (fecha_tratamiento DESC, tiempo_retiro_dias) WHERE deleted_at IS NULL AND tiempo_retiro_dias > 0;
 
 -- 4.11 Alimentación y Raciones
 CREATE TABLE IF NOT EXISTS alimentacion_raciones (
@@ -243,7 +285,7 @@ CREATE TABLE IF NOT EXISTS alimentacion_raciones (
     fase_alimentacion VARCHAR(50) NOT NULL,
     cantidad_kg NUMERIC(10,2) NOT NULL CHECK (cantidad_kg > 0),
     fecha_suministro TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    costo_total NUMERIC(12,2) DEFAULT 0.00,
+    costo_total NUMERIC(12,2) NOT NULL DEFAULT 0.00 CHECK (costo_total >= 0),
     observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
@@ -266,11 +308,13 @@ CREATE TABLE IF NOT EXISTS reproduccion_servicios (
     fecha_probable_parto DATE GENERATED ALWAYS AS ((fecha_servicio + '114 days'::interval)) STORED,
     estado_confirmacion VARCHAR(30) NOT NULL DEFAULT 'pendiente' CHECK (estado_confirmacion = ANY (ARRAY['pendiente', 'positiva', 'negativa', 'repetida'])),
     fecha_diagnostico DATE,
+    observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT chk_servicio_progenitores_distintos CHECK (macho_id IS NULL OR hembra_id <> macho_id)
 );
 
 -- 4.13 Reproducción: Partos
@@ -281,10 +325,11 @@ CREATE TABLE IF NOT EXISTS reproduccion_partos (
     corral_maternidad_id UUID REFERENCES corrales(id) ON DELETE SET NULL,
     atendido_por UUID NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
     fecha_parto TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    numero_parto INT NOT NULL DEFAULT 1 CHECK (numero_parto >= 1),
     nacidos_vivos INT NOT NULL DEFAULT 0 CHECK (nacidos_vivos >= 0),
     nacidos_muertos INT NOT NULL DEFAULT 0 CHECK (nacidos_muertos >= 0),
     momias INT NOT NULL DEFAULT 0 CHECK (momias >= 0),
-    peso_camada_total_kg NUMERIC(6,2) NOT NULL DEFAULT 0.00,
+    peso_camada_total_kg NUMERIC(6,2) NOT NULL DEFAULT 0.00 CHECK (peso_camada_total_kg >= 0),
     observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
@@ -304,6 +349,7 @@ CREATE TABLE IF NOT EXISTS reproduccion_destetes (
     lechones_destetados INT NOT NULL CHECK (lechones_destetados >= 0),
     peso_total_kg NUMERIC(6,2) NOT NULL CHECK (peso_total_kg >= 0),
     dias_lactancia INT CHECK (dias_lactancia >= 0),
+    observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -325,6 +371,7 @@ CREATE TABLE IF NOT EXISTS registro_pesos (
     ancho_cm DOUBLE PRECISION,
     bbox JSONB,
     foto_evidencia_url TEXT,
+    observaciones TEXT,
     id_local UUID,
     sync_status estado_sincronizacion_enum NOT NULL DEFAULT 'synced',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -338,6 +385,109 @@ BEGIN
         SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'registro_pesos'
     ) THEN
         PERFORM create_hypertable('registro_pesos', by_range('tiempo', INTERVAL '7 days'));
+    END IF;
+END $$;
+
+-- 4.16 Homologación Idempotente de Columnas para Bases de Datos Preexistentes
+DO $$
+BEGIN
+    -- ejecucion_bioseguridad: migrar fecha_ejecucion -> fecha_registro y cumplido -> estado si vienen de versión previa
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'fecha_ejecucion'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'fecha_registro'
+    ) THEN
+        ALTER TABLE ejecucion_bioseguridad RENAME COLUMN fecha_ejecucion TO fecha_registro;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'fecha_registro'
+    ) THEN
+        ALTER TABLE ejecucion_bioseguridad ADD COLUMN fecha_registro TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'estado'
+    ) THEN
+        ALTER TABLE ejecucion_bioseguridad ADD COLUMN estado VARCHAR(50) NOT NULL DEFAULT 'completado';
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'cumplido'
+        ) THEN
+            EXECUTE 'UPDATE ejecucion_bioseguridad SET estado = CASE WHEN cumplido THEN ''completado'' ELSE ''pendiente'' END';
+        END IF;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE ejecucion_bioseguridad ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ejecucion_bioseguridad' AND column_name = 'deleted_at'
+    ) THEN
+        ALTER TABLE ejecucion_bioseguridad ADD COLUMN deleted_at TIMESTAMPTZ;
+    END IF;
+
+    -- Asegurar columnas añadidas en tablas preexistentes
+    ALTER TABLE reproduccion_partos ALTER COLUMN servicio_id DROP NOT NULL;
+    ALTER TABLE reproduccion_destetes ALTER COLUMN parto_id DROP NOT NULL;
+    ALTER TABLE movimientos_inventario ALTER COLUMN motivo TYPE VARCHAR(255);
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'inventario_items' AND column_name = 'factor_conversion_kg'
+    ) THEN
+        ALTER TABLE inventario_items ADD COLUMN factor_conversion_kg NUMERIC(8,3) NOT NULL DEFAULT 1.000 CHECK (factor_conversion_kg > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'sanidad_tratamientos' AND column_name = 'lote_inventario_id'
+    ) THEN
+        ALTER TABLE sanidad_tratamientos ADD COLUMN lote_inventario_id UUID REFERENCES inventario_lotes(id) ON DELETE SET NULL;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'sanidad_tratamientos' AND column_name = 'lote_biologico'
+    ) THEN
+        ALTER TABLE sanidad_tratamientos ADD COLUMN lote_biologico VARCHAR(100);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'reproduccion_servicios' AND column_name = 'observaciones'
+    ) THEN
+        ALTER TABLE reproduccion_servicios ADD COLUMN observaciones TEXT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'reproduccion_partos' AND column_name = 'numero_parto'
+    ) THEN
+        ALTER TABLE reproduccion_partos ADD COLUMN numero_parto INT NOT NULL DEFAULT 1 CHECK (numero_parto >= 1);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'reproduccion_destetes' AND column_name = 'observaciones'
+    ) THEN
+        ALTER TABLE reproduccion_destetes ADD COLUMN observaciones TEXT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'registro_pesos' AND column_name = 'observaciones'
+    ) THEN
+        ALTER TABLE registro_pesos ADD COLUMN observaciones TEXT;
     END IF;
 END $$;
 
@@ -373,7 +523,7 @@ BEGIN
     END IF;
 END $$;
 
--- 5.2 Vista Analítica GMD: vista_gmd_diaria_corral
+-- 5.2 Vista Analítica GMD: vista_gmd_diaria_corral (con cálculo real por días transcurridos)
 CREATE OR REPLACE VIEW vista_gmd_diaria_corral AS
 WITH serie_pesos AS (
     SELECT cagg.dia_bucket,
@@ -392,9 +542,19 @@ SELECT dia_bucket AS fecha,
        peso_promedio_kg,
        peso_minimo_kg,
        peso_maximo_kg,
-       round(peso_promedio_kg - peso_anterior_kg, 3) AS gmd_kg,
        CASE
-           WHEN peso_anterior_kg IS NOT NULL AND peso_anterior_kg > 0::numeric 
+           WHEN peso_anterior_kg IS NOT NULL
+                AND fecha_anterior IS NOT NULL
+                AND EXTRACT(EPOCH FROM (dia_bucket - fecha_anterior)) > 0
+           THEN round(
+               (peso_promedio_kg - peso_anterior_kg)
+               / GREATEST(1::numeric, (EXTRACT(EPOCH FROM (dia_bucket - fecha_anterior)) / 86400.0)::numeric),
+               3
+           )
+           ELSE NULL
+       END AS gmd_kg,
+       CASE
+           WHEN peso_anterior_kg IS NOT NULL AND peso_anterior_kg > 0::numeric
            THEN round((peso_promedio_kg - peso_anterior_kg) / peso_anterior_kg * 100::numeric, 2)
            ELSE 0.00
        END AS variacion_porcentual
@@ -431,6 +591,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_protocolos_bioseguridad_updated_at') THEN
         CREATE TRIGGER trg_protocolos_bioseguridad_updated_at BEFORE UPDATE ON protocolos_bioseguridad FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_ejecucion_bioseguridad_updated_at') THEN
+        CREATE TRIGGER trg_ejecucion_bioseguridad_updated_at BEFORE UPDATE ON ejecucion_bioseguridad FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_sanidad_tratamientos_updated_at') THEN
         CREATE TRIGGER trg_sanidad_tratamientos_updated_at BEFORE UPDATE ON sanidad_tratamientos FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
@@ -448,102 +611,13 @@ BEGIN
     END IF;
 END $$;
 
--- 7. DATOS SEMILLA (INSERT ON CONFLICT DO NOTHING)
-
--- 7.1 Usuarios (Contraseñas Hasheadas con Bcrypt: admin123, vet123, ope123)
+-- 7. USUARIO ADMINISTRADOR INICIAL (ÚNICA SEMILLA DEL SISTEMA)
 INSERT INTO usuarios (id, nombre, apellido, email, password_hash, rol, telefono, activo, sync_status)
-VALUES 
-    ('b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Julian', 'Barco', 'admin@sigep.com', '$2b$12$ikzt/pdSvBnKVf9bCVBXm.IjSTmoBDznRny/z8zi4Hjhd3M4p7CHC', 'administrador', '3101112233', true, 'synced'),
-    ('b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a23', 'Maria', 'Lopez', 'vet@sigep.com', '$2b$12$bo8AcLlfqvgp0Z7EaCXqxu9SOGM4.U5C8quE4SPm6FzwE082h7mEG', 'veterinario', '3114445566', true, 'synced'),
-    ('b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24', 'Juan', 'Perez', 'operario@sigep.com', '$2b$12$NEZVVQDPwmilCPHu.8Uzh.5NU2aZFjZwJyxIK.Z/v3q7WSwi5zJh2', 'operario', '3127778899', true, 'synced')
+VALUES
+    ('b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Julian', 'Barco', 'admin@sigep.com', '$2b$12$ikzt/pdSvBnKVf9bCVBXm.IjSTmoBDznRny/z8zi4Hjhd3M4p7CHC', 'administrador', '3101112233', true, 'synced')
 ON CONFLICT (id) DO UPDATE SET
     nombre = EXCLUDED.nombre,
     apellido = EXCLUDED.apellido,
     email = EXCLUDED.email,
     password_hash = EXCLUDED.password_hash,
     rol = EXCLUDED.rol;
-
--- 7.2 Corrales
-INSERT INTO corrales (id, codigo, descripcion, fase, capacidad_maxima, fecha_inicio, activo, sync_status)
-VALUES
-    ('c1eebc99-9c0b-4ef8-bb6d-6bb9bd380a31', 'CORRAL-01', 'Lote Maternidad y Parideras Norte', 'maternidad', 12, '2026-01-01', true, 'synced'),
-    ('c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a32', 'CORRAL-09', 'Lote Precebo - Transición Temprana', 'precebo', 30, '2026-02-15', true, 'synced'),
-    ('c3eebc99-9c0b-4ef8-bb6d-6bb9bd380a33', 'LOTE-42', 'Lote Engorde Final - Galpón 3 Ceba', 'ceba', 25, '2026-03-01', true, 'synced'),
-    ('c4eebc99-9c0b-4ef8-bb6d-6bb9bd380a34', 'LOTE-15', 'Lote Levante y Crecimiento', 'levante', 25, '2026-02-01', true, 'synced'),
-    ('c5eebc99-9c0b-4ef8-bb6d-6bb9bd380a35', 'SECTOR-A12', 'Corral Gestación y Reemplazo', 'gestacion', 15, '2026-01-10', true, 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.3 Categorías de Inventario
-INSERT INTO inventario_categorias (id, codigo, nombre, color, descripcion)
-VALUES
-    ('e1eebc99-9c0b-4ef8-bb6d-6bb9bd380a51', 'alimento', 'Alimento Concentrado', 'blue', 'Dietas y piensos balanceados por etapa'),
-    ('e2eebc99-9c0b-4ef8-bb6d-6bb9bd380a52', 'medicamento', 'Medicamentos y Biológicos', 'emerald', 'Antibióticos, vacunas y antiparasitarios'),
-    ('e3eebc99-9c0b-4ef8-bb6d-6bb9bd380a53', 'bioseguridad', 'Material e Higiene', 'purple', 'Desinfectantes y elementos sanitarios'),
-    ('e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a54', 'suplemento', 'Suplementos y Minerales', 'orange', 'Electrolitos y vitaminas')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.4 Items de Inventario
-INSERT INTO inventario_items (id, categoria_id, codigo_sku, nombre, unidad_medida, stock_actual, stock_minimo, costo_unitario, ubicacion_bodega, sync_status)
-VALUES
-    ('f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'e1eebc99-9c0b-4ef8-bb6d-6bb9bd380a51', 'INS-001', 'Iniciación Lechones Precebo 1', 'Bultos (40kg)', 85.00, 20.00, 98000.00, 'Silo 1', 'synced'),
-    ('f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'e1eebc99-9c0b-4ef8-bb6d-6bb9bd380a51', 'INS-002', 'Ceba Finalización Harina Forte', 'Bultos (40kg)', 120.00, 30.00, 89000.00, 'Silo 2', 'synced'),
-    ('f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'e2eebc99-9c0b-4ef8-bb6d-6bb9bd380a52', 'INS-004', 'Ivermectina 1% Antiparasitario', 'Frascos (250ml)', 15.00, 5.00, 42000.00, 'Botiquín A', 'synced'),
-    ('f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'e2eebc99-9c0b-4ef8-bb6d-6bb9bd380a52', 'INS-005', 'Vacuna Peste Porcina Clásica (PPC)', 'Dosis', 100.00, 25.00, 15000.00, 'Nevera 1', 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.4.1 Lotes de Inventario
-INSERT INTO inventario_lotes (id, item_id, numero_lote, fecha_fabricacion, fecha_vencimiento, cantidad_inicial, cantidad_disponible, registro_ica, sync_status)
-VALUES
-    ('a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'LOT-ALM-2026-01', '2026-01-15', '2026-07-15', 100.00, 85.00, 'ICA-78901', 'synced'),
-    ('a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'LOT-CEB-2026-02', '2026-02-01', '2026-08-01', 150.00, 120.00, 'ICA-78902', 'synced'),
-    ('a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'LOT-MED-2026-03', '2025-11-10', '2027-11-10', 20.00, 15.00, 'ICA-54321', 'synced'),
-    ('a4eebc99-9c0b-4ef8-bb6d-6bb9bd380a94', 'f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'LOT-VAC-2026-04', '2026-01-05', '2026-12-31', 100.00, 100.00, 'ICA-11223', 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.4.2 Movimientos Iniciales de Kardex
-INSERT INTO movimientos_inventario (id, item_id, lote_inventario_id, tipo_movimiento, cantidad, costo_unitario, usuario_id, motivo, sync_status)
-VALUES
-    ('d1eebc99-9c0b-4ef8-bb6d-6bb9bd380a01', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'entrada_compra', 100.00, 98000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso inicial por compra Factura F-2026-01', 'synced'),
-    ('d2eebc99-9c0b-4ef8-bb6d-6bb9bd380a02', 'f1eebc99-9c0b-4ef8-bb6d-6bb9bd380a61', 'a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a91', 'salida_consumo', 15.00, 98000.00, 'b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24', 'Alimentación semanal Lote Precebo', 'synced'),
-    ('d3eebc99-9c0b-4ef8-bb6d-6bb9bd380a03', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'entrada_compra', 150.00, 89000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso inicial por compra Factura F-2026-02', 'synced'),
-    ('d4eebc99-9c0b-4ef8-bb6d-6bb9bd380a04', 'f2eebc99-9c0b-4ef8-bb6d-6bb9bd380a62', 'a2eebc99-9c0b-4ef8-bb6d-6bb9bd380a92', 'salida_consumo', 30.00, 89000.00, 'b3eebc99-9c0b-4ef8-bb6d-6bb9bd380a24', 'Ración Corral Engorde Titán', 'synced'),
-    ('d5eebc99-9c0b-4ef8-bb6d-6bb9bd380a05', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'entrada_compra', 20.00, 42000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Dotación botiquín veterinario', 'synced'),
-    ('d6eebc99-9c0b-4ef8-bb6d-6bb9bd380a06', 'f3eebc99-9c0b-4ef8-bb6d-6bb9bd380a63', 'a3eebc99-9c0b-4ef8-bb6d-6bb9bd380a93', 'salida_consumo', 5.00, 42000.00, 'b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a23', 'Desparasitación plan sanitario general', 'synced'),
-    ('d7eebc99-9c0b-4ef8-bb6d-6bb9bd380a07', 'f4eebc99-9c0b-4ef8-bb6d-6bb9bd380a64', 'a4eebc99-9c0b-4ef8-bb6d-6bb9bd380a94', 'entrada_compra', 100.00, 15000.00, 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', 'Ingreso biológicos cadena de frío', 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.5 Protocolos de Bioseguridad
-INSERT INTO protocolos_bioseguridad (id, codigo, tipo_protocolo, tarea, descripcion, icono, frecuencia, activo, sync_status)
-VALUES
-    ('71eebc99-9c0b-4ef8-bb6d-6bb9bd380a81', 'S1', 'estructural', 'Cerco Perimetral', 'Malla o barda a 50m de galpones.', 'ShieldCheck', 'semanal', true, 'synced'),
-    ('72eebc99-9c0b-4ef8-bb6d-6bb9bd380a82', 'S2', 'estructural', 'Filtro Sanitario', 'Ducha obligatoria y cambio de ropa.', 'UserCheck', 'diaria', true, 'synced'),
-    ('73eebc99-9c0b-4ef8-bb6d-6bb9bd380a83', 'S3', 'estructural', 'Arco de Desinfección', 'Desinfección total de chasis y ruedas.', 'Truck', 'diaria', true, 'synced'),
-    ('74eebc99-9c0b-4ef8-bb6d-6bb9bd380a84', 'O1', 'operacional', 'Control de Plagas', 'Plan documentado para roedores e insectos.', 'Bug', 'quincenal', true, 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.6 Animales Iniciales
-INSERT INTO animales (id, codigo_arete, codigo_qr, nombre_alias, sexo, raza, fecha_nacimiento, estado, corral_id, peso_actual_kg, sync_status)
-VALUES
-    ('01eebc99-9c0b-4ef8-bb6d-6bb9bd380a71', 'PT-2026-001', 'QR-PT-2026-001', 'Titan', 'macho', 'Pietrain', '2025-08-10', 'engorde', 'c3eebc99-9c0b-4ef8-bb6d-6bb9bd380a33', 118.00, 'synced'),
-    ('02eebc99-9c0b-4ef8-bb6d-6bb9bd380a72', '2024-001', 'QR-2024-001', 'Apolo', 'macho', 'Duroc', '2025-11-20', 'precebo', 'c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a32', 29.50, 'synced'),
-    ('03eebc99-9c0b-4ef8-bb6d-6bb9bd380a73', '2024-042', 'QR-2024-042', 'Atenea', 'hembra', 'Landrace', '2025-10-15', 'levante', 'c4eebc99-9c0b-4ef8-bb6d-6bb9bd380a34', 56.50, 'synced'),
-    ('04eebc99-9c0b-4ef8-bb6d-6bb9bd380a74', 'H-001', 'QR-H-001', 'Matrona 1', 'hembra', 'Landrace x Pietrain', '2024-05-15', 'gestacion', 'c5eebc99-9c0b-4ef8-bb6d-6bb9bd380a35', 185.50, 'synced'),
-    ('05eebc99-9c0b-4ef8-bb6d-6bb9bd380a75', 'C-089', 'QR-C-089', 'Junior', 'macho', 'Hampshire', '2025-10-25', 'levante', 'c4eebc99-9c0b-4ef8-bb6d-6bb9bd380a34', 44.00, 'synced')
-ON CONFLICT (id) DO NOTHING;
-
--- 7.7 Pesajes Iniciales (Registro en Hipertabla)
-INSERT INTO registro_pesos (tiempo, id_registro, id_cerdo, corral_id, peso_kg, metodo, confianza_ia, sync_status)
-VALUES
-    ('2026-07-15 04:00:00-05', '9a23a9ca-5b15-4cf6-ac1d-c42dfc90f574', '01eebc99-9c0b-4ef8-bb6d-6bb9bd380a71', 'c3eebc99-9c0b-4ef8-bb6d-6bb9bd380a33', 85.00, 'manual', NULL, 'synced'),
-    ('2026-08-01 03:00:00-05', '8c82c9ef-4ca1-4b05-84d5-cee171534a57', '02eebc99-9c0b-4ef8-bb6d-6bb9bd380a72', 'c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a32', 22.00, 'manual', NULL, 'synced'),
-    ('2026-08-05 04:15:00-05', '373fabd3-501a-42f2-a292-3fee6c770150', '01eebc99-9c0b-4ef8-bb6d-6bb9bd380a71', 'c3eebc99-9c0b-4ef8-bb6d-6bb9bd380a33', 102.00, 'vision_ai', 0.962, 'synced'),
-    ('2026-08-20 03:30:00-05', 'c0dcd86f-c88e-44d8-a600-2ef0ede72354', '02eebc99-9c0b-4ef8-bb6d-6bb9bd380a72', 'c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a32', 29.50, 'vision_ai', 0.975, 'synced'),
-    ('2026-08-25 04:45:00-05', '5a970cb6-24ab-4f84-b359-6f466ab4d282', '01eebc99-9c0b-4ef8-bb6d-6bb9bd380a71', 'c3eebc99-9c0b-4ef8-bb6d-6bb9bd380a33', 118.00, 'vision_ai', 0.981, 'synced')
-ON CONFLICT (tiempo, id_registro, id_cerdo) DO NOTHING;
-
--- 8. REFRESCO DE VISTA CONTINUA Y PRIVILEGIOS
-
--- Privilegios de acceso universal para desarrollo local
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO PUBLIC;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
-GRANT ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public TO PUBLIC;

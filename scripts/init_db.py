@@ -112,6 +112,12 @@ async def execute_init_sql():
             "inventario_lotes",
             "movimientos_inventario",
             "protocolos_bioseguridad",
+            "ejecucion_bioseguridad",
+            "sanidad_tratamientos",
+            "alimentacion_raciones",
+            "reproduccion_servicios",
+            "reproduccion_partos",
+            "reproduccion_destetes",
             "registro_pesos",
         ]
         for tbl in tables:

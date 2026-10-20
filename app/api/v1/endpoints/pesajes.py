@@ -92,7 +92,6 @@ async def _persistir_pesaje_vision(
         )
     )
     animal.peso_actual_kg = Decimal(str(round(peso, 2)))
-    animal.updated_at = func.clock_timestamp()
     await db.commit()
     return {"id_registro": nuevo_id, "tiempo": tiempo, "peso_actual_kg": round(peso, 2)}
 
@@ -275,7 +274,6 @@ async def delete_pesaje(
     animal = await db.get(Animal, id_cerdo)
     if animal:
         animal.peso_actual_kg = Decimal(str(nuevo_peso))
-        animal.updated_at = func.clock_timestamp()
 
     await db.commit()
     return PesajeDeleteResponse(
@@ -328,13 +326,13 @@ async def create_pesaje_manual(
         corral_id=pesaje_in.corral_id,
         peso_kg=float(pesaje_in.peso_kg),
         metodo=metodo_val,
+        observaciones=pesaje_in.observaciones,
         sync_status="synced",
     )
     db.add(nuevo_registro)
 
     # 4. Actualización en tabla animales
     animal.peso_actual_kg = Decimal(str(round(pesaje_in.peso_kg, 2)))
-    animal.updated_at = func.clock_timestamp()
 
     await db.commit()
 
@@ -351,6 +349,7 @@ async def create_pesaje_manual(
         ancho_cm=None,
         bbox=None,
         foto_evidencia_url=None,
+        observaciones=pesaje_in.observaciones,
         sync_status="synced",
         created_at=tiempo_pesaje,
         cerdo_alias=animal.nombre_alias,
@@ -410,6 +409,7 @@ async def get_pesajes_by_animal(
                 ancho_cm=reg.ancho_cm,
                 bbox=reg.bbox,
                 foto_evidencia_url=reg.foto_evidencia_url,
+                observaciones=reg.observaciones,
                 sync_status=reg.sync_status,
                 created_at=reg.created_at,
                 cerdo_alias=animal.nombre_alias,
@@ -470,7 +470,17 @@ async def get_corral_gmd(
                     peso_promedio_kg,
                     peso_minimo_kg,
                     peso_maximo_kg,
-                    ROUND((peso_promedio_kg - LAG(peso_promedio_kg) OVER (ORDER BY fecha))::numeric, 3) AS gmd_kg,
+                    CASE
+                        WHEN LAG(peso_promedio_kg) OVER (ORDER BY fecha) IS NOT NULL
+                             AND LAG(fecha) OVER (ORDER BY fecha) IS NOT NULL
+                             AND EXTRACT(EPOCH FROM (fecha - LAG(fecha) OVER (ORDER BY fecha))) > 0
+                        THEN ROUND(
+                            ((peso_promedio_kg - LAG(peso_promedio_kg) OVER (ORDER BY fecha))
+                            / GREATEST(1::numeric, (EXTRACT(EPOCH FROM (fecha - LAG(fecha) OVER (ORDER BY fecha))) / 86400.0)::numeric))::numeric,
+                            3
+                        )
+                        ELSE NULL
+                    END AS gmd_kg,
                     CASE 
                         WHEN LAG(peso_promedio_kg) OVER (ORDER BY fecha) > 0 
                         THEN ROUND(((peso_promedio_kg - LAG(peso_promedio_kg) OVER (ORDER BY fecha)) / LAG(peso_promedio_kg) OVER (ORDER BY fecha) * 100)::numeric, 2)

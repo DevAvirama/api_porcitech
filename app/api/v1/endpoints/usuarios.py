@@ -161,8 +161,6 @@ async def update_usuario(
     if user_update.password:
         user.password_hash = await get_password_hash_async(user_update.password)
 
-
-    user.updated_at = func.clock_timestamp()
     await db.commit()
     await db.refresh(user)
 

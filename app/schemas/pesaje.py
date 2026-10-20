@@ -87,6 +87,7 @@ class PesajeResponse(BaseModel):
     ancho_cm: Optional[float] = None
     bbox: Optional[Dict[str, Any]] = None
     foto_evidencia_url: Optional[str] = None
+    observaciones: Optional[str] = None
     sync_status: str
     created_at: datetime
     cerdo_alias: Optional[str] = None

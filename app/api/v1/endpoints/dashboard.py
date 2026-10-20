@@ -33,15 +33,15 @@ async def get_dashboard_kpis(
         """
         WITH metricas_animales AS (
             SELECT 
-                COUNT(*) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS total_activos,
-                COALESCE(AVG(peso_actual_kg) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido') AND peso_actual_kg > 0), 0) AS peso_promedio,
-                COUNT(*) FILTER (WHERE corral_id IS NOT NULL AND deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')) AS asignados
+                COUNT(*) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido', 'descarte')) AS total_activos,
+                COALESCE(AVG(peso_actual_kg) FILTER (WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido', 'descarte') AND peso_actual_kg > 0), 0) AS peso_promedio,
+                COUNT(*) FILTER (WHERE corral_id IS NOT NULL AND deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido', 'descarte')) AS asignados
             FROM animales
         ),
         etapas_conteo AS (
             SELECT estado::text AS estado, COUNT(*) AS cantidad
             FROM animales
-            WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido')
+            WHERE deleted_at IS NULL AND estado NOT IN ('muerto', 'vendido', 'descarte')
             GROUP BY estado
         ),
         metricas_etapas AS (

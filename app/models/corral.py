@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 tipo_fase_corral_enum = PG_ENUM(
     "maternidad",
     "precebo",
+    "destete",
     "levante",
     "ceba",
+    "engorde",
     "cuarentena",
     "gestacion",
     name="tipo_fase_corral_enum",

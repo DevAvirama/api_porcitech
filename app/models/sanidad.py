@@ -108,6 +108,16 @@ class EjecucionBioseguridad(Base):
         nullable=False,
         server_default=func.clock_timestamp(),
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     protocolo: Mapped[Optional["ProtocoloBioseguridad"]] = relationship("ProtocoloBioseguridad", back_populates="ejecuciones", lazy="joined")
     operario: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
@@ -156,6 +166,12 @@ class SanidadTratamiento(Base):
         ForeignKey("inventario_items.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    lote_inventario_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("inventario_lotes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    lote_biologico: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     tipo_evento: Mapped[str] = mapped_column(String(50), nullable=False)
     producto_nombre: Mapped[str] = mapped_column(String(120), nullable=False)
     diagnostico: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)

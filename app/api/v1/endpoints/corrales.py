@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import String, and_, cast, func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -48,7 +48,7 @@ async def list_corrales(
             and_(
                 Animal.corral_id == Corral.id,
                 Animal.deleted_at.is_(None),
-                cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+                Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
             ),
         )
         .where(Corral.deleted_at.is_(None))
@@ -81,7 +81,7 @@ async def get_corral(
             and_(
                 Animal.corral_id == Corral.id,
                 Animal.deleted_at.is_(None),
-                cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+                Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
             ),
         )
         .where(Corral.id == id, Corral.deleted_at.is_(None))
@@ -166,7 +166,7 @@ async def update_corral(
     ocupacion_query = select(func.count(Animal.id)).where(
         Animal.corral_id == id,
         Animal.deleted_at.is_(None),
-        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+        Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
     )
     ocupacion_actual = int((await db.execute(ocupacion_query)).scalar() or 0)
 
@@ -215,7 +215,6 @@ async def update_corral(
     if "fecha_cierre" in update_data:
         corral.fecha_cierre = update_data["fecha_cierre"] or date.today()
 
-    corral.updated_at = func.clock_timestamp()
     await db.commit()
     await db.refresh(corral)
     return _to_corral_response(corral, ocupacion_actual)
@@ -245,7 +244,7 @@ async def delete_corral(
     animals_query = select(Animal.id).where(
         Animal.corral_id == id,
         Animal.deleted_at.is_(None),
-        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+        Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
     ).limit(1)
     animals_result = await db.execute(animals_query)
     if animals_result.scalars().first():
@@ -258,7 +257,6 @@ async def delete_corral(
     corral.activo = False
     if not corral.fecha_cierre:
         corral.fecha_cierre = date.today()
-    corral.updated_at = func.clock_timestamp()
 
     await db.commit()
     return {"message": f"Corral '{corral.codigo}' eliminado lógicamente con éxito."}

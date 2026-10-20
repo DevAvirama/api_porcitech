@@ -2,7 +2,7 @@ import uuid
 from decimal import Decimal
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -49,7 +49,7 @@ async def _validar_corral_y_capacidad(
     count_query = select(func.count(Animal.id)).where(
         Animal.corral_id == corral_id,
         Animal.deleted_at.is_(None),
-        cast(Animal.estado, String).notin_(ESTADOS_INACTIVOS_CORRAL),
+        Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
     )
     if exclude_animal_id is not None:
         count_query = count_query.where(Animal.id != exclude_animal_id)
@@ -303,7 +303,6 @@ async def update_animal(
                 val = Decimal(str(val))
             setattr(animal, field, val)
 
-    animal.updated_at = func.clock_timestamp()
     await db.commit()
 
     # Recargar con el corral

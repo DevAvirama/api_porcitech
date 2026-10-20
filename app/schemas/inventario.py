@@ -20,6 +20,7 @@ class InventarioItemBase(BaseModel):
     codigo_sku: str
     nombre: str
     unidad_medida: str
+    factor_conversion_kg: Optional[float] = 1.0
     stock_actual: Optional[float] = 0.0
     stock_minimo: float = 0.0
     costo_unitario: float = 0.0
@@ -53,6 +54,7 @@ class InventarioItemResponse(BaseModel):
     codigo_sku: str
     nombre: str
     unidad_medida: str
+    factor_conversion_kg: float = 1.0
     stock_actual: float
     stock_minimo: float
     costo_unitario: float

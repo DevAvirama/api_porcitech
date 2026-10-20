@@ -52,6 +52,8 @@ def _to_tratamiento_response(t: SanidadTratamiento) -> SanidadTratamientoRespons
         veterinario_id=t.veterinario_id,
         veterinario_nombre=vet_nombre,
         medicamento_id=t.medicamento_id,
+        lote_inventario_id=t.lote_inventario_id,
+        lote_biologico=t.lote_biologico,
         tipo_evento=t.tipo_evento,
         producto_nombre=t.producto_nombre,
         diagnostico=t.diagnostico,
@@ -217,6 +219,12 @@ async def create_tratamiento(
     Registra un evento clínico o vacunación. Si se provee medicamento_id y dosis,
     descuenta automáticamente de bodega generando un movimiento Kardex.
     """
+    if not body.animal_id and not body.corral_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe especificar al menos un animal (animal_id) o un corral (corral_id) para el tratamiento sanitario.",
+        )
+
     # Validar animal si fue provisto
     if body.animal_id:
         a_query = select(Animal).where(Animal.id == body.animal_id, Animal.deleted_at.is_(None))
@@ -238,6 +246,8 @@ async def create_tratamiento(
             )
 
     vet_id = await resolve_user_or_fallback(db, current_user, role="veterinario")
+    fecha_trata = body.fecha_tratamiento or datetime.now(timezone.utc)
+    tratamiento_id = uuid.uuid4()
 
     # Si se asocia medicamento del inventario, descontar stock de bodega
     if body.medicamento_id and body.dosis and body.dosis > 0:
@@ -264,22 +274,26 @@ async def create_tratamiento(
         item.stock_actual -= cant_dec
         mov_kardex = MovimientoInventario(
             item_id=item.id,
+            lote_inventario_id=body.lote_inventario_id,
             tipo_movimiento="salida_consumo",
             cantidad=cant_dec,
             costo_unitario=item.costo_unitario,
             usuario_id=vet_id,
             motivo=f"Aplicación clínica ({body.tipo_evento}): {body.diagnostico or body.producto_nombre}",
+            referencia_modulo="sanidad",
+            referencia_id=tratamiento_id,
             sync_status="synced",
         )
         db.add(mov_kardex)
 
-    fecha_trata = body.fecha_tratamiento or datetime.now(timezone.utc)
-
     nuevo_tratamiento = SanidadTratamiento(
+        id=tratamiento_id,
         animal_id=body.animal_id,
         corral_id=body.corral_id,
         veterinario_id=vet_id,
         medicamento_id=body.medicamento_id,
+        lote_inventario_id=body.lote_inventario_id,
+        lote_biologico=body.lote_biologico.strip() if body.lote_biologico else None,
         tipo_evento=body.tipo_evento,
         producto_nombre=body.producto_nombre.strip(),
         diagnostico=body.diagnostico.strip() if body.diagnostico else None,

@@ -58,6 +58,7 @@ class ReproduccionServicio(Base):
     )
     estado_confirmacion: Mapped[str] = mapped_column(String(30), nullable=False, default="pendiente")
     fecha_diagnostico: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     id_local: Mapped[Optional[uuid.UUID]] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     sync_status: Mapped[str] = mapped_column(
         estado_sincronizacion_enum,
@@ -123,6 +124,7 @@ class ReproduccionParto(Base):
         nullable=False,
         server_default=func.clock_timestamp(),
     )
+    numero_parto: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     nacidos_vivos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     nacidos_muertos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     momias: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -197,6 +199,7 @@ class ReproduccionDestete(Base):
     lechones_destetados: Mapped[int] = mapped_column(Integer, nullable=False)
     peso_total_kg: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
     dias_lactancia: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     id_local: Mapped[Optional[uuid.UUID]] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     sync_status: Mapped[str] = mapped_column(
         estado_sincronizacion_enum,

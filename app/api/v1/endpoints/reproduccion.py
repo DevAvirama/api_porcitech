@@ -45,6 +45,7 @@ def _to_servicio_response(s: ReproduccionServicio) -> ReproduccionServicioRespon
         fecha_probable_parto=s.fecha_probable_parto,
         estado_confirmacion=s.estado_confirmacion,
         fecha_diagnostico=s.fecha_diagnostico,
+        observaciones=s.observaciones,
         sync_status=s.sync_status,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -68,6 +69,7 @@ def _to_parto_response(p: ReproduccionParto) -> ReproduccionPartoResponse:
         atendido_por=p.atendido_por,
         atendido_por_nombre=atendido_nombre,
         fecha_parto=p.fecha_parto,
+        numero_parto=p.numero_parto,
         nacidos_vivos=p.nacidos_vivos,
         nacidos_muertos=p.nacidos_muertos,
         momias=p.momias,
@@ -95,6 +97,7 @@ def _to_destete_response(d: ReproduccionDestete) -> ReproduccionDesteteResponse:
         lechones_destetados=d.lechones_destetados,
         peso_total_kg=float(d.peso_total_kg),
         dias_lactancia=d.dias_lactancia,
+        observaciones=d.observaciones,
         sync_status=d.sync_status,
         created_at=d.created_at,
     )
@@ -169,6 +172,7 @@ async def create_servicio(
         fecha_servicio=body.fecha_servicio,
         estado_confirmacion=body.estado_confirmacion or "pendiente",
         fecha_diagnostico=body.fecha_diagnostico,
+        observaciones=body.observaciones,
         sync_status="synced",
     )
     db.add(nuevo_servicio)
@@ -217,7 +221,8 @@ async def update_servicio(
 
     servicio.estado_confirmacion = clean_estado
     servicio.fecha_diagnostico = body.fecha_diagnostico or date.today()
-    servicio.updated_at = func.clock_timestamp()
+    if body.observaciones is not None:
+        servicio.observaciones = body.observaciones
 
     # Regla de Negocio Zootécnica: si es 'positiva', pasar la cerda a 'gestacion'
     if clean_estado == "positiva":
@@ -228,9 +233,8 @@ async def update_servicio(
         hembra_res = await db.execute(hembra_query)
         hembra = hembra_res.unique().scalar_one_or_none()
         if hembra:
-            if hembra.estado in ("activo", "lactante", "precebo", "levante"):
+            if hembra.estado in ("activo", "lactante", "precebo", "levante", "reemplazo"):
                 hembra.estado = "gestacion"
-                hembra.updated_at = func.clock_timestamp()
 
     await db.commit()
 
@@ -325,6 +329,7 @@ async def create_parto(
         corral_maternidad_id=body.corral_maternidad_id,
         atendido_por=atendido_id,
         fecha_parto=fecha_parto_dt,
+        numero_parto=body.numero_parto or 1,
         nacidos_vivos=body.nacidos_vivos,
         nacidos_muertos=body.nacidos_muertos,
         momias=body.momias,
@@ -333,6 +338,13 @@ async def create_parto(
         sync_status="synced",
     )
     db.add(nuevo_parto)
+
+    # Regla de negocio zootécnica: al parir, la hembra pasa a etapa 'lactante'
+    if hembra.estado not in ("muerto", "vendido", "descarte"):
+        hembra.estado = "lactante"
+    if body.corral_maternidad_id:
+        hembra.corral_id = body.corral_maternidad_id
+
     await db.commit()
 
     # Recargar con relaciones
@@ -434,9 +446,15 @@ async def create_destete(
         lechones_destetados=body.lechones_destetados,
         peso_total_kg=Decimal(str(body.peso_total_kg)),
         dias_lactancia=calculated_lactancia,
+        observaciones=body.observaciones,
         sync_status="synced",
     )
     db.add(nuevo_destete)
+
+    # Regla de negocio zootécnica: tras el destete, la hembra regresa a estado 'activo'
+    if hembra.estado == "lactante":
+        hembra.estado = "activo"
+
     await db.commit()
 
     # Recargar con relaciones

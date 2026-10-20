@@ -71,6 +71,11 @@ class InventarioItem(Base):
     codigo_sku: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
     nombre: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     unidad_medida: Mapped[str] = mapped_column(String(50), nullable=False)
+    factor_conversion_kg: Mapped[Decimal] = mapped_column(
+        Numeric(8, 3),
+        nullable=False,
+        default=Decimal("1.000"),
+    )
     stock_actual: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     stock_minimo: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
     costo_unitario: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))

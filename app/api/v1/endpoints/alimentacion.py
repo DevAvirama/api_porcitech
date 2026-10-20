@@ -102,34 +102,27 @@ async def register_racion(
             detail="La cantidad de alimento suministrado debe ser mayor a 0 kg",
         )
 
-    # Descontar stock si es posible
-    if item.stock_actual < cant_dec:
-        # Si no hay suficiente stock en bultos/kg, avisamos o permitimos según política
+    # Calcular conversión según factor_conversion_kg del insumo (ej. bulto de 40 kg vs 1 kg)
+    factor = item.factor_conversion_kg if (item.factor_conversion_kg and item.factor_conversion_kg > 0) else Decimal("1.000")
+    unidades_descontar = (cant_dec / factor).quantize(Decimal("0.01"))
+    if unidades_descontar <= 0:
+        unidades_descontar = Decimal("0.01")
+
+    if item.stock_actual < unidades_descontar:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Stock insuficiente del alimento '{item.nombre}'. Disponible: {item.stock_actual} {item.unidad_medida}, Requerido: {cant_dec} kg",
+            detail=f"Stock insuficiente del alimento '{item.nombre}'. Disponible: {item.stock_actual} {item.unidad_medida}, Requerido: {unidades_descontar} {item.unidad_medida} ({cant_dec} kg)",
         )
 
-    item.stock_actual -= cant_dec
-    costo_total = item.costo_unitario * cant_dec
+    item.stock_actual -= unidades_descontar
+    costo_total = (unidades_descontar * item.costo_unitario).quantize(Decimal("0.01"))
 
     operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
-
-    # Registrar salida en Kardex
-    mov_kardex = MovimientoInventario(
-        item_id=item.id,
-        tipo_movimiento="salida_consumo",
-        cantidad=cant_dec,
-        costo_unitario=item.costo_unitario,
-        usuario_id=operario_id,
-        motivo=f"Alimentación {body.fase_alimentacion} en corral {corral.codigo}",
-        sync_status="synced",
-    )
-    db.add(mov_kardex)
-
     fecha_sum = body.fecha_suministro or datetime.now(timezone.utc)
+    racion_id = uuid.uuid4()
 
     nueva_racion = AlimentacionRacion(
+        id=racion_id,
         corral_id=body.corral_id,
         alimento_item_id=body.alimento_item_id,
         operario_id=operario_id,
@@ -141,6 +134,20 @@ async def register_racion(
         sync_status="synced",
     )
     db.add(nueva_racion)
+
+    # Registrar salida en Kardex vinculada a la ración
+    mov_kardex = MovimientoInventario(
+        item_id=item.id,
+        tipo_movimiento="salida_consumo",
+        cantidad=unidades_descontar,
+        costo_unitario=item.costo_unitario,
+        usuario_id=operario_id,
+        motivo=f"Alimentación {body.fase_alimentacion} en corral {corral.codigo} ({cant_dec} kg)",
+        referencia_modulo="alimentacion",
+        referencia_id=racion_id,
+        sync_status="synced",
+    )
+    db.add(mov_kardex)
     await db.commit()
 
     # Recargar con relaciones en una sola consulta

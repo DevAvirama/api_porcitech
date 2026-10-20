@@ -29,6 +29,8 @@ estado_animal_enum = PG_ENUM(
     "vendido",
     "muerto",
     "enfermo",
+    "descarte",
+    "reemplazo",
     name="estado_animal_enum",
     create_type=False,
 )

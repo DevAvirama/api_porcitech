@@ -12,6 +12,7 @@ class ReproduccionServicioBase(BaseModel):
     fecha_servicio: date
     estado_confirmacion: Optional[str] = "pendiente"
     fecha_diagnostico: Optional[date] = None
+    observaciones: Optional[str] = None
 
 
 class ReproduccionServicioCreate(ReproduccionServicioBase):
@@ -39,6 +40,7 @@ class ReproduccionServicioResponse(BaseModel):
     fecha_probable_parto: Optional[date] = None
     estado_confirmacion: str
     fecha_diagnostico: Optional[date] = None
+    observaciones: Optional[str] = None
     sync_status: str
     created_at: datetime
     updated_at: datetime
@@ -51,6 +53,7 @@ class ReproduccionPartoBase(BaseModel):
     hembra_id: UUID
     corral_maternidad_id: Optional[UUID] = None
     fecha_parto: Optional[datetime] = None
+    numero_parto: Optional[int] = Field(default=1, ge=1)
     nacidos_vivos: int = Field(default=0, ge=0)
     nacidos_muertos: int = Field(default=0, ge=0)
     momias: int = Field(default=0, ge=0)
@@ -73,6 +76,7 @@ class ReproduccionPartoResponse(BaseModel):
     atendido_por: UUID
     atendido_por_nombre: Optional[str] = None
     fecha_parto: datetime
+    numero_parto: int = 1
     nacidos_vivos: int
     nacidos_muertos: int
     momias: int
@@ -93,6 +97,7 @@ class ReproduccionDesteteBase(BaseModel):
     lechones_destetados: int = Field(..., ge=0)
     peso_total_kg: float = Field(..., ge=0)
     dias_lactancia: Optional[int] = Field(default=None, ge=0)
+    observaciones: Optional[str] = None
 
 
 class ReproduccionDesteteCreate(ReproduccionDesteteBase):
@@ -113,6 +118,7 @@ class ReproduccionDesteteResponse(BaseModel):
     lechones_destetados: int
     peso_total_kg: float
     dias_lactancia: Optional[int] = None
+    observaciones: Optional[str] = None
     sync_status: str
     created_at: datetime
 

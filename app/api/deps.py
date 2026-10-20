@@ -162,14 +162,17 @@ async def resolve_user_or_fallback(
         role or "cualquiera",
     )
 
-    query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
+    base_query = select(Usuario.id).where(Usuario.activo.is_(True), Usuario.deleted_at.is_(None))
     if role:
-        query = query.where(Usuario.rol == role)
+        role_res = await db.execute(base_query.where(Usuario.rol == role).limit(1))
+        user_id = role_res.scalar_one_or_none()
+        if user_id:
+            return user_id
 
-    result = await db.execute(query.limit(1))
-    user_id = result.scalar_one_or_none()
-    if user_id:
-        return user_id
+    any_res = await db.execute(base_query.limit(1))
+    any_user_id = any_res.scalar_one_or_none()
+    if any_user_id:
+        return any_user_id
 
     # Fallback ID semilla (admin general)
     return uuid.UUID("b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22")

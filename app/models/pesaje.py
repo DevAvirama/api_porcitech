@@ -82,6 +82,10 @@ class RegistroPeso(Base):
         Text,
         nullable=True,
     )
+    observaciones: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
     id_local: Mapped[Optional[uuid.UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
         nullable=True,
