@@ -6,18 +6,23 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
+from app.core.config import settings
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
 from app.models.user import Usuario
 from app.schemas.pesaje import (
+    DahuaLiveStatusResponse,
+    DahuaStreamConfigRequest,
     GMDDiariaItem,
     PesajeCamaraRTSPRequest,
+    PesajeCapturaEnVivoRequest,
     PesajeDeleteResponse,
     PesajeManualCreate,
     PesajeResponse,
@@ -29,6 +34,7 @@ from app.vision.pipeline import (
     ejecutar_inferencia_morfometrica_sync,
 )
 from app.vision.rtsp_client import capturar_fotograma_v380_sync
+from app.vision.dahua_stream import dahua_stream_manager
 
 logger = logging.getLogger(__name__)
 
@@ -173,10 +179,119 @@ async def estimar_peso_vision(
     return _construir_respuesta_vision(resultado, "archivo", persistencia)
 
 
+@router.get(
+    "/stream/live",
+    summary="Streaming de video en vivo (MJPEG) desde la cámara Dahua con IA",
+    description="Transmite un flujo multipart/x-mixed-replace JPEG en vivo con HUD e inferencia morfométrica en tiempo real.",
+)
+async def live_stream_dahua(
+    request: Request,
+    channel: int = Query(1, ge=1, le=2, description="Canal (1=Óptico, 2=Térmico)"),
+    subtype: int = Query(0, ge=0, le=1, description="Subtipo (0=Principal 1080P, 1=Substream fluido)"),
+    password: Optional[str] = Query(None, description="Contraseña opcional de la cámara Dahua"),
+    pixels_per_cm: Optional[float] = Query(None, gt=1.0, le=100.0, description="Factor de calibración px/cm"),
+):
+    model = getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)
+    if model and dahua_stream_manager.yolo_model is None:
+        yolo_lock = getattr(request.app.state, "yolo_lock", None)
+        dahua_stream_manager.set_model(model, yolo_lock)
+
+    dahua_stream_manager.update_config(
+        channel=channel,
+        subtype=subtype,
+        password=password,
+        pixels_per_cm=pixels_per_cm,
+    )
+
+    return StreamingResponse(
+        dahua_stream_manager.generate_mjpeg_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "close",
+        },
+    )
+
+
+@router.get(
+    "/stream/status",
+    response_model=DahuaLiveStatusResponse,
+    summary="Estado de la conexión y métricas en vivo de la cámara Dahua",
+    description="Retorna el peso estimado instantáneo, nivel de confianza, dimensiones dorsales y FPS.",
+)
+async def get_stream_status(request: Request):
+    model = getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)
+    if model and dahua_stream_manager.yolo_model is None:
+        yolo_lock = getattr(request.app.state, "yolo_lock", None)
+        dahua_stream_manager.set_model(model, yolo_lock)
+
+    return dahua_stream_manager.get_status()
+
+
+@router.post(
+    "/stream/config",
+    summary="Actualizar configuración de la cámara Dahua",
+)
+async def update_stream_config(
+    payload: DahuaStreamConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+):
+    await resolve_user_or_fallback(db, current_user, role="operario")
+    dahua_stream_manager.update_config(
+        ip=payload.camera_ip,
+        port=payload.camera_port,
+        user=payload.camera_user,
+        password=payload.camera_password,
+        channel=payload.channel,
+        subtype=payload.subtype,
+        pixels_per_cm=payload.pixels_per_cm,
+    )
+    return {"message": "Configuración de streaming actualizada", "status": dahua_stream_manager.get_status()}
+
+
+@router.post(
+    "/capturar-en-vivo",
+    response_model=PesajeVisionResponse,
+    summary="Capturar y registrar el peso actual desde el video en vivo",
+    description="Toma el fotograma del animal encuadrado, calcula el peso final y lo persiste en TimescaleDB.",
+)
+async def capturar_peso_en_vivo(
+    request: Request,
+    payload: PesajeCapturaEnVivoRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+) -> PesajeVisionResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+
+    model = _obtener_modelo(request)
+
+    if payload.channel or payload.subtype is not None:
+        dahua_stream_manager.update_config(channel=payload.channel, subtype=payload.subtype)
+
+    try:
+        resultado = await asyncio.to_thread(
+            dahua_stream_manager.capture_snapshot,
+            model,
+            payload.pixels_per_cm,
+            payload.validar_bordes,
+        )
+    except (ConnectionError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    persistencia = None
+    if payload.persistir:
+        persistencia = await _persistir_pesaje_vision(db, payload.id_cerdo, payload.corral_id, resultado)
+
+    return _construir_respuesta_vision(resultado, "dahua_en_vivo", persistencia)
+
+
 @router.post(
     "/camara-rtsp",
     response_model=PesajeVisionResponse,
-    summary="Capturar y estimar peso desde cámara cenital V380 Pro (RTSP/TCP)",
+    summary="Capturar y estimar peso desde cámara Dahua TPC-BF (RTSP/TCP)",
     description="Drena el buffer RTSP, captura el fotograma en vivo y ejecuta la inferencia sin bloquear el event loop.",
 )
 async def estimar_peso_camara_rtsp(
@@ -187,11 +302,11 @@ async def estimar_peso_camara_rtsp(
 ) -> PesajeVisionResponse:
     await resolve_user_or_fallback(db, current_user, role="operario")
 
-    rtsp_url = (payload.rtsp_url or os.getenv("V380_RTSP_URL") or "").strip()
+    rtsp_url = (payload.rtsp_url or getattr(settings, "DAHUA_RTSP_URL", None) or os.getenv("DAHUA_RTSP_URL") or os.getenv("V380_RTSP_URL") or "").strip()
     if not rtsp_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No se indicó rtsp_url ni está definida la variable de entorno V380_RTSP_URL.",
+            detail="No se indicó rtsp_url ni está configurada DAHUA_RTSP_URL.",
         )
     if not rtsp_url.lower().startswith(("rtsp://", "rtsps://")):
         raise HTTPException(
@@ -214,7 +329,7 @@ async def estimar_peso_camara_rtsp(
                     model,
                     frame_bgr,
                     payload.pixels_per_cm,
-                    0.45,
+                    0.35,
                     payload.validar_bordes,
                 )
         else:
@@ -223,7 +338,7 @@ async def estimar_peso_camara_rtsp(
                 model,
                 frame_bgr,
                 payload.pixels_per_cm,
-                0.45,
+                0.35,
                 payload.validar_bordes,
             )
     except ValueError as exc:

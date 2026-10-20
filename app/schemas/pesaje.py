@@ -28,10 +28,55 @@ class InferenciaVisionResponse(BaseModel):
 class PesajeCamaraRTSPRequest(BaseModel):
     id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
     corral_id: UUID = Field(..., description="UUID del corral del cerdo")
-    rtsp_url: Optional[str] = Field(None, description="URL RTSP de la cámara V380 Pro (por omisión V380_RTSP_URL)")
+    rtsp_url: Optional[str] = Field(None, description="URL RTSP de la cámara Dahua TPC-BF")
     pixels_per_cm: Optional[float] = None
     validar_bordes: bool = False
     persistir: bool = True
+
+
+class PesajeCapturaEnVivoRequest(BaseModel):
+    id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
+    corral_id: UUID = Field(..., description="UUID del corral del cerdo")
+    persistir: bool = True
+    pixels_per_cm: Optional[float] = None
+    validar_bordes: bool = False
+    channel: Optional[int] = 1
+    subtype: Optional[int] = 0
+
+
+class DahuaStreamConfigRequest(BaseModel):
+    camera_ip: Optional[str] = None
+    camera_port: Optional[int] = None
+    camera_user: Optional[str] = None
+    camera_password: Optional[str] = None
+    channel: Optional[int] = Field(None, ge=1, le=2)
+    subtype: Optional[int] = Field(None, ge=0, le=1)
+    pixels_per_cm: Optional[float] = Field(None, gt=1.0, le=100.0)
+
+
+class DahuaLiveMetrics(BaseModel):
+    detectado: bool = False
+    peso_estimado_kg: Optional[float] = None
+    confianza: Optional[float] = None
+    area_cm2: Optional[float] = None
+    largo_cm: Optional[float] = None
+    ancho_cm: Optional[float] = None
+    total_detectados: int = 0
+    mensaje: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class DahuaLiveStatusResponse(BaseModel):
+    connected: bool
+    camera_ip: str
+    camera_port: int
+    channel: int
+    subtype: int
+    channel_name: str
+    fps: float
+    active_clients: int
+    last_error: Optional[str] = None
+    metrics: DahuaLiveMetrics
 
 
 class PesajeVisionResponse(BaseModel):

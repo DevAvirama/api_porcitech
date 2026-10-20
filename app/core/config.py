@@ -24,6 +24,24 @@ class Settings(BaseSettings):
     CORS_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?"
     YOLO_WEIGHTS_PATH: str = "weights/best.pt"
 
+    # =========================================================================
+    # Configuración de Cámara Dahua TPC-BF (Bi-spectrum Térmica y Óptica)
+    # =========================================================================
+    DAHUA_CAMERA_IP: str = "192.168.1.108"
+    DAHUA_CAMERA_PORT: int = 554
+    DAHUA_CAMERA_USER: str = "admin"
+    DAHUA_CAMERA_PASSWORD: str = "admin123"
+    DAHUA_RTSP_URL: str = "rtsp://admin:admin123@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0"
+    DAHUA_SUBSTREAM_RTSP_URL: str = "rtsp://admin:admin123@192.168.1.108:554/cam/realmonitor?channel=1&subtype=1"
+    DAHUA_THERMAL_RTSP_URL: str = "rtsp://admin:admin123@192.168.1.108:554/cam/realmonitor?channel=2&subtype=0"
+
+    # Parámetros de Calibración Geométrica y Alométrica
+    DEFAULT_REF_WIDTH: int = 1280
+    DEFAULT_PIXELS_PER_CM_AT_1280: float = 15.2
+    COEF_ALOMETRICO_A: float = 0.0245
+    EXPONENTE_ALOMETRICO_B: float = 1.052
+    FACTOR_OCUPACION_DORSAL: float = 0.76
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:

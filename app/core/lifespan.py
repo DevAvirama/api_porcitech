@@ -40,6 +40,11 @@ async def lifespan(app: FastAPI):
                 logger.info("🔥 Warmup YOLO completado (640x640).")
             except Exception as warm_exc:
                 logger.warning(f"⚠️ Warmup YOLO omitido: {warm_exc}")
+
+            # Vincular modelo y lock al gestor de streaming en vivo Dahua
+            from app.vision.dahua_stream import dahua_stream_manager
+            dahua_stream_manager.set_model(app.state.yolo_model, app.state.yolo_lock)
+            logger.info("📹 DahuaStreamManager inicializado con modelo YOLO en memoria.")
         except Exception as exc:
             logger.warning(
                 f"⚠️ Advertencia: No se pudo cargar el modelo YOLO desde {resolved_weights}: {exc}. "
@@ -61,7 +66,13 @@ async def lifespan(app: FastAPI):
     # --- FASE DE APAGADO (SHUTDOWN) ---
     logger.info(f"🛑 Deteniendo {settings.PROJECT_NAME}, liberando recursos de IA y pool de base de datos...")
     
-    # Liberación de memoria del modelo
+    # Liberación de memoria del modelo y detención de streams
+    try:
+        from app.vision.dahua_stream import dahua_stream_manager
+        dahua_stream_manager.stop()
+    except Exception:
+        pass
+
     if hasattr(app.state, "yolo_model"):
         app.state.yolo_model = None
     app.state.model = None
