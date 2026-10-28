@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://192.168.32.134:3000",
     ]
-    CORS_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?"
+    CORS_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|[a-zA-Z0-9-]+(\.local)?)(:\d+)?"
     YOLO_WEIGHTS_PATH: str = "weights/best.pt"
 
     # =========================================================================

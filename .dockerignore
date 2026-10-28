@@ -1,6 +1,9 @@
 .venv
 venv
 ENV
+.env
+.env.*
+!.env.example
 __pycache__
 *.pyc
 *.pyo
@@ -10,9 +13,11 @@ __pycache__
 htmlcov
 .git
 .gitignore
+.gitattributes
 .idea
 .vscode
 Dockerfile
 .dockerignore
+deploy
 tests
 *.md

@@ -37,30 +37,40 @@ TARGET_DB = parsed.path.lstrip("/") or "porcitech_db"
 INIT_SQL_PATH = BACKEND_DIR / "scripts" / "init.sql"
 
 
+async def connect_with_retry(database: str, max_retries: int = 15, delay: float = 2.0):
+    """Conecta a PostgreSQL con reintentos para tolerar el reinicio tras docker-entrypoint-initdb."""
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await asyncpg.connect(
+                user=DB_USER,
+                password=DB_PASSWORD,
+                host=DB_HOST,
+                port=DB_PORT,
+                database=database,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                print(f"[*] Esperando disponibilidad de PostgreSQL ({attempt}/{max_retries}): {exc}")
+                await asyncio.sleep(delay)
+    # Fallback sin contraseña si usa autenticación local trust
+    try:
+        return await asyncpg.connect(
+            user=os.getenv("USER", "postgres"),
+            host=DB_HOST,
+            port=DB_PORT,
+            database=database,
+        )
+    except Exception:
+        print(f"[!] Error crítico de conexión tras {max_retries} intentos: {last_exc}")
+        raise last_exc
+
+
 async def ensure_database_exists():
     """Conecta a la base de datos 'postgres' y crea la base destino si no existe."""
     print(f"[*] Conectando a PostgreSQL ({DB_HOST}:{DB_PORT}) para verificar la base de datos '{TARGET_DB}'...")
-    try:
-        conn = await asyncpg.connect(
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT,
-            database="postgres"
-        )
-    except Exception as e:
-        print(f"[-] No se pudo conectar a la base de datos 'postgres' como {DB_USER}: {e}")
-        # Intentar conectar con usuario santiago o sin password si trust
-        try:
-            conn = await asyncpg.connect(
-                user=os.getenv("USER", "postgres"),
-                host=DB_HOST,
-                port=DB_PORT,
-                database="postgres"
-            )
-        except Exception as e2:
-            print(f"[!] Error crítico de conexión: {e2}")
-            raise
+    conn = await connect_with_retry("postgres")
 
     try:
         db_exists = await conn.fetchval(
@@ -83,16 +93,10 @@ async def execute_init_sql():
         sys.exit(1)
 
     print(f"[*] Leyendo script SQL: {INIT_SQL_PATH}...")
-    sql_content = INIT_SQL_PATH.read_text(encoding="utf-8")
+    sql_content = INIT_SQL_PATH.read_text(encoding="utf-8").replace("\r\n", "\n")
 
     print(f"[*] Conectando a '{TARGET_DB}' para aplicar DDL y semillas...")
-    conn = await asyncpg.connect(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT,
-        database=TARGET_DB
-    )
+    conn = await connect_with_retry(TARGET_DB)
 
     try:
         print("[*] Ejecutando DDL (extensiones, tablas, hipertabla, vistas continuas y semillas)...")

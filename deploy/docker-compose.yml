@@ -1,0 +1,116 @@
+networks:
+  porcitech-net:
+    name: porcitech-net
+    driver: bridge
+
+volumes:
+  porcitech_pgdata:
+    name: porcitech_pgdata
+
+services:
+  # =============================================================
+  # 1. BASE DE DATOS (PostgreSQL 16 + TimescaleDB)
+  # =============================================================
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: porcitech-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: porcitech_db
+      TZ: America/Bogota
+      PGTZ: America/Bogota
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - porcitech_pgdata:/var/lib/postgresql/data
+      - ./porcitech-backend/scripts/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - porcitech-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d porcitech_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # =============================================================
+  # 2. FRONTEND (Next.js 16 + React 19)
+  # =============================================================
+  frontend:
+    container_name: porcitech-frontend
+    build:
+      context: ./porcitech-nextjs
+      dockerfile: Dockerfile
+      args:
+        # En blanco por defecto: el navegador detecta automáticamente localhost o la IP de red/VM en el puerto 8000
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    restart: unless-stopped
+    environment:
+      - TZ=America/Bogota
+      - INTERNAL_API_URL=http://api:8000/api/v1
+    ports:
+      - "0.0.0.0:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    networks:
+      - porcitech-net
+
+  # =============================================================
+  # 3. BACKEND API (FastAPI + Visión YOLO Integrada)
+  # =============================================================
+  api:
+    container_name: porcitech-api
+    build:
+      context: ./porcitech-backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8000:8000"
+    environment:
+      - TZ=America/Bogota
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/porcitech_db
+      - SECRET_KEY=clave_secreta_jwt_porcitech_desarrollo_sena_2026
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.32.134:3000"]}
+      - CORS_ORIGIN_REGEX=${CORS_ORIGIN_REGEX:-https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|[a-zA-Z0-9-]+(\.local)?)(:\d+)?}
+      - DAHUA_CAMERA_IP=${DAHUA_CAMERA_IP:-192.168.1.108}
+      - DAHUA_CAMERA_PORT=${DAHUA_CAMERA_PORT:-554}
+      - DAHUA_CAMERA_USER=${DAHUA_CAMERA_USER:-admin}
+      - DAHUA_CAMERA_PASSWORD=${DAHUA_CAMERA_PASSWORD:-admin123}
+      - DAHUA_RTSP_URL=${DAHUA_RTSP_URL:-rtsp://admin:admin123@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - porcitech-net
+
+  # =============================================================
+  # 4. VISIÓN ARTIFICIAL MICROSERVICIO (FastAPI / YOLO)
+  # =============================================================
+  vision:
+    container_name: porcitech-vision
+    build:
+      context: ./vision-artificial
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - TZ=America/Bogota
+    ports:
+      - "0.0.0.0:8001:8001"
+    networks:
+      - porcitech-net
