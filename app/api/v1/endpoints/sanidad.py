@@ -96,6 +96,7 @@ async def list_protocolos(
 @router.get("/bioseguridad/ejecuciones", response_model=List[EjecucionBioseguridadResponse])
 async def list_ejecuciones(
     fecha: Optional[date] = Query(None, description="Fecha de consulta (por defecto hoy)"),
+    corral_id: Optional[UUID] = Query(None, description="Filtrar por corral específico"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -108,7 +109,10 @@ async def list_ejecuciones(
     query = select(EjecucionBioseguridad).where(
         EjecucionBioseguridad.fecha_registro >= start_dt,
         EjecucionBioseguridad.fecha_registro < end_dt,
+        EjecucionBioseguridad.deleted_at.is_(None),
     )
+    if corral_id is not None:
+        query = query.where(EjecucionBioseguridad.corral_id == corral_id)
     result = await db.execute(query)
     ejecuciones = result.scalars().all()
     return [_to_bioseguridad_response(ej) for ej in ejecuciones]

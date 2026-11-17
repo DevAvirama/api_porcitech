@@ -1,15 +1,20 @@
 import json
+import logging
 from typing import List, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEV_SECRET_KEY = "clave_secreta_jwt_porcitech_desarrollo_sena_2026"
 
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "PorciTech API"
     VERSION: str = "1.0.0"
-    ENVIRONMENT: str = "development"
+    # Seguro por defecto: en "production" no hay fallback anónimo en mutaciones.
+    # Para desarrollo local defina ENVIRONMENT=development en .env.
+    ENVIRONMENT: str = "production"
     API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str = "clave_secreta_jwt_porcitech_desarrollo_sena_2026"
+    SECRET_KEY: str = _DEV_SECRET_KEY
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/porcitech_db"
     DB_POOL_SIZE: int = 10
@@ -80,3 +85,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if settings.ENVIRONMENT.lower() == "production" and settings.SECRET_KEY == _DEV_SECRET_KEY:
+    logging.getLogger("porcitech.config").warning(
+        "SECRET_KEY usa el valor de ejemplo del repositorio en producción. "
+        "Defina SECRET_KEY con un valor aleatorio propio (p. ej. `openssl rand -hex 32`)."
+    )
