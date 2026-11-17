@@ -135,7 +135,7 @@ class InventarioLote(Base):
     fecha_vencimiento: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     cantidad_inicial: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     cantidad_disponible: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    registro_ica: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    registro_ica: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     id_local: Mapped[Optional[uuid.UUID]] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     sync_status: Mapped[str] = mapped_column(
         estado_sincronizacion_enum,

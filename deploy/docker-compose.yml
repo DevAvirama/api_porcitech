@@ -16,9 +16,9 @@ services:
     container_name: porcitech-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: porcitech_db
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-porcitech_db}
       TZ: America/Bogota
       PGTZ: America/Bogota
     ports:
@@ -77,9 +77,9 @@ services:
       - "0.0.0.0:8000:8000"
     environment:
       - TZ=America/Bogota
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/porcitech_db
-      - SECRET_KEY=clave_secreta_jwt_porcitech_desarrollo_sena_2026
-      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/porcitech_db}
+      - SECRET_KEY=${SECRET_KEY:-clave_secreta_jwt_porcitech_desarrollo_sena_2026}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.32.134:3000"]}
       - CORS_ORIGIN_REGEX=${CORS_ORIGIN_REGEX:-https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|[a-zA-Z0-9-]+(\.local)?)(:\d+)?}
       - DAHUA_CAMERA_IP=${DAHUA_CAMERA_IP:-192.168.1.108}

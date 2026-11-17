@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import ipaddress
 import logging
 import os
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 import cv2
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -15,6 +17,7 @@ from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.core.config import settings
+from app.core.security import decode_access_token
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
@@ -154,6 +157,64 @@ def _construir_respuesta_vision(
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
+def _validate_camera_host(host: str) -> str:
+    """Valida que el host/IP de cámara sea válido y no apunte a loopback o metadata cloud."""
+    clean = (host or "").strip()
+    if not clean or any(c.isspace() or c in "@/?" for c in clean):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Dirección de cámara inválida.",
+        )
+    if clean.lower() == "localhost":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se permite conectar cámaras a direcciones loopback.",
+        )
+    try:
+        ip_obj = ipaddress.ip_address(clean)
+        if ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_unspecified or ip_obj.is_multicast:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La IP de la cámara apunta a un rango reservado o de enlace local no permitido.",
+            )
+    except ValueError:
+        pass
+    return clean
+
+
+def _validate_rtsp_url(rtsp_url: str) -> str:
+    """Valida esquema RTSP/RTSPS y previene SSRF hacia loopback/metadata."""
+    parsed = urlparse(rtsp_url)
+    if parsed.scheme.lower() not in ("rtsp", "rtsps") or not parsed.hostname:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La URL de la cámara debe usar estrictamente el protocolo rtsp:// o rtsps:// con host válido.",
+        )
+    _validate_camera_host(parsed.hostname)
+    return rtsp_url
+
+
+def _ensure_stream_access(request: Request, current_user: Optional[Usuario]) -> None:
+    """En producción exige sesión JWT válida vía Bearer o cookie de sesión (<img src>)."""
+    if settings.ENVIRONMENT.lower() != "production":
+        return
+    if current_user is not None:
+        return
+    cookie_token = request.cookies.get("token") or request.cookies.get("porcitech_token")
+    if cookie_token and decode_access_token(cookie_token):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Autenticación requerida para acceder al flujo de cámara en producción.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _encode_jpeg_b64(frame: Any, quality: int = 88) -> str:
+    _, buffer_jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return f"data:image/jpeg;base64,{base64.b64encode(buffer_jpg).decode('utf-8')}"
+
+
 @router.get(
     "/calibracion",
     response_model=CalibracionEstadoResponse,
@@ -161,7 +222,7 @@ MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
     description="Retorna la escala espacial px/cm activa (ArUco persistido o fábrica) y estado de los modelos YOLO y XGBoost.",
 )
 async def obtener_estado_calibracion(request: Request) -> CalibracionEstadoResponse:
-    calib = cargar_calibracion_persistente()
+    calib = await asyncio.to_thread(cargar_calibracion_persistente)
     yolo_ok = (getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)) is not None
     xgb_ok = getattr(request.app.state, "xgb_model", None) is not None
     if calib:
@@ -220,17 +281,20 @@ async def calibrar_con_aruco(
 
     alto, ancho = frame.shape[:2]
     resolucion_str = f"{ancho}x{alto}"
-    datos_guardados = guardar_calibracion_persistente(
-        pixels_per_cm_1280=resultado["pixels_per_cm_base1280"],
-        tamano_marcador_cm=tamano_marcador_cm,
-        marcador_id=resultado["marcador_id"],
-        resolucion=resolucion_str,
-        diccionario=resultado["diccionario"],
+    datos_guardados = await asyncio.to_thread(
+        guardar_calibracion_persistente,
+        resultado["pixels_per_cm_base1280"],
+        tamano_marcador_cm,
+        resultado["marcador_id"],
+        resolucion_str,
+        resultado["diccionario"],
     )
-    dahua_stream_manager.update_config(pixels_per_cm=resultado["pixels_per_cm_base1280"])
+    await asyncio.to_thread(
+        dahua_stream_manager.update_config,
+        pixels_per_cm=resultado["pixels_per_cm_base1280"],
+    )
 
-    _, buffer_jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    img_b64 = f"data:image/jpeg;base64,{base64.b64encode(buffer_jpg).decode('utf-8')}"
+    img_b64 = await asyncio.to_thread(_encode_jpeg_b64, frame, 88)
 
     return CalibracionArUcoResponse(
         status="ok",
@@ -327,18 +391,20 @@ async def live_stream_dahua(
     request: Request,
     channel: int = Query(1, ge=1, le=2, description="Canal (1=Óptico, 2=Térmico)"),
     subtype: int = Query(0, ge=0, le=1, description="Subtipo (0=Principal 1080P, 1=Substream fluido)"),
-    password: Optional[str] = Query(None, description="Contraseña opcional de la cámara Dahua"),
     pixels_per_cm: Optional[float] = Query(None, gt=1.0, le=100.0, description="Factor de calibración px/cm"),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ):
+    _ensure_stream_access(request, current_user)
     model = getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)
+    xgb_model = getattr(request.app.state, "xgb_model", None)
     if model and dahua_stream_manager.yolo_model is None:
         yolo_lock = getattr(request.app.state, "yolo_lock", None)
-        dahua_stream_manager.set_model(model, yolo_lock)
+        dahua_stream_manager.set_model(model, yolo_lock, xgb_model)
 
-    dahua_stream_manager.update_config(
+    await asyncio.to_thread(
+        dahua_stream_manager.update_config,
         channel=channel,
         subtype=subtype,
-        password=password,
         pixels_per_cm=pixels_per_cm,
     )
 
@@ -360,13 +426,18 @@ async def live_stream_dahua(
     summary="Estado de la conexión y métricas en vivo de la cámara Dahua",
     description="Retorna el peso estimado instantáneo, nivel de confianza, dimensiones dorsales y FPS.",
 )
-async def get_stream_status(request: Request):
+async def get_stream_status(
+    request: Request,
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+):
+    _ensure_stream_access(request, current_user)
     model = getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)
+    xgb_model = getattr(request.app.state, "xgb_model", None)
     if model and dahua_stream_manager.yolo_model is None:
         yolo_lock = getattr(request.app.state, "yolo_lock", None)
-        dahua_stream_manager.set_model(model, yolo_lock)
+        dahua_stream_manager.set_model(model, yolo_lock, xgb_model)
 
-    return dahua_stream_manager.get_status()
+    return await asyncio.to_thread(dahua_stream_manager.get_status)
 
 
 @router.post(
@@ -379,8 +450,10 @@ async def update_stream_config(
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ):
     await resolve_user_or_fallback(db, current_user, role="operario")
-    dahua_stream_manager.update_config(
-        ip=payload.camera_ip,
+    safe_ip = _validate_camera_host(payload.camera_ip) if payload.camera_ip else None
+    await asyncio.to_thread(
+        dahua_stream_manager.update_config,
+        ip=safe_ip,
         port=payload.camera_port,
         user=payload.camera_user,
         password=payload.camera_password,
@@ -388,7 +461,8 @@ async def update_stream_config(
         subtype=payload.subtype,
         pixels_per_cm=payload.pixels_per_cm,
     )
-    return {"message": "Configuración de streaming actualizada", "status": dahua_stream_manager.get_status()}
+    status_data = await asyncio.to_thread(dahua_stream_manager.get_status)
+    return {"message": "Configuración de streaming actualizada", "status": status_data}
 
 
 @router.post(
@@ -408,7 +482,11 @@ async def capturar_peso_en_vivo(
     model = _obtener_modelo(request)
 
     if payload.channel or payload.subtype is not None:
-        dahua_stream_manager.update_config(channel=payload.channel, subtype=payload.subtype)
+        await asyncio.to_thread(
+            dahua_stream_manager.update_config,
+            channel=payload.channel,
+            subtype=payload.subtype,
+        )
 
     try:
         resultado = await asyncio.to_thread(
@@ -447,11 +525,7 @@ async def estimar_peso_camara_rtsp(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se indicó rtsp_url ni está configurada DAHUA_RTSP_URL.",
         )
-    if not rtsp_url.lower().startswith(("rtsp://", "rtsps://")):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La URL de la cámara debe usar estrictamente el protocolo rtsp:// o rtsps://.",
-        )
+    _validate_rtsp_url(rtsp_url)
 
     model = _obtener_modelo(request)
     xgb_model = getattr(request.app.state, "xgb_model", None)
@@ -469,9 +543,10 @@ async def estimar_peso_camara_rtsp(
                     model,
                     frame_bgr,
                     payload.pixels_per_cm,
-                    0.35,
+                    0.45,
                     payload.validar_bordes,
                     xgb_model,
+                    payload.tamano_marcador_cm,
                 )
         else:
             resultado = await asyncio.to_thread(
@@ -479,9 +554,10 @@ async def estimar_peso_camara_rtsp(
                 model,
                 frame_bgr,
                 payload.pixels_per_cm,
-                0.35,
+                0.45,
                 payload.validar_bordes,
                 xgb_model,
+                payload.tamano_marcador_cm,
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

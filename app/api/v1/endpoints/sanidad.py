@@ -17,6 +17,7 @@ from app.models.sanidad import (
     SanidadTratamiento,
 )
 from app.models.user import Usuario
+from app.services.zootecnia_service import consumir_lotes_fefo
 from app.schemas.sanidad import (
     AlertaRetiroResponse,
     EjecucionBioseguridadCreate,
@@ -141,13 +142,16 @@ async def toggle_protocol_execution(
     # Buscar ejecución existente hoy (rango indexable por fecha_registro)
     query_exec = select(EjecucionBioseguridad).where(
         EjecucionBioseguridad.protocolo_id == body.protocolo_id,
+        EjecucionBioseguridad.deleted_at.is_(None),
         EjecucionBioseguridad.fecha_registro >= start_dt,
         EjecucionBioseguridad.fecha_registro < end_dt,
     )
     if body.corral_id:
         query_exec = query_exec.where(EjecucionBioseguridad.corral_id == body.corral_id)
+    else:
+        query_exec = query_exec.where(EjecucionBioseguridad.corral_id.is_(None))
 
-    res_exec = await db.execute(query_exec)
+    res_exec = await db.execute(query_exec.limit(1))
     existing_exec = res_exec.scalar_one_or_none()
 
     if existing_exec:
@@ -307,65 +311,21 @@ async def create_tratamiento(
                 detail=f"Stock insuficiente del medicamento '{item.nombre}'. Disponible: {item.stock_actual}, Dosis requerida: {cant_dec}",
             )
 
-        # Si no se especificó lote explícito, verificar lotes registrados (regla FEFO y bloqueo si todos están vencidos)
-        if target_lote is None:
-            lotes_item_query = (
-                select(InventarioLote)
-                .where(
-                    InventarioLote.item_id == item.id,
-                    InventarioLote.deleted_at.is_(None),
-                    InventarioLote.cantidad_disponible > 0,
-                )
-                .order_by(InventarioLote.fecha_vencimiento.asc().nullslast())
-                .with_for_update(of=InventarioLote)
-            )
-            lotes_con_stock = (await db.execute(lotes_item_query)).scalars().all()
-            if lotes_con_stock:
-                lotes_vigentes = [
-                    l for l in lotes_con_stock
-                    if l.fecha_vencimiento is None or l.fecha_vencimiento >= hoy
-                ]
-                if not lotes_vigentes:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Operación bloqueada (HU30 / Normativa ICA): Todos los lotes disponibles de '{item.nombre}' "
-                            f"se encuentran vencidos. Registre una entrada con un lote vigente antes de aplicar."
-                        ),
-                    )
-                # Seleccionar automáticamente el primer lote vigente con saldo suficiente (FEFO)
-                fefo_lote = next((l for l in lotes_vigentes if l.cantidad_disponible >= cant_dec), None)
-                if fefo_lote is not None:
-                    target_lote = fefo_lote
-                    resolved_lote_id = fefo_lote.id
-                    if not resolved_lote_biologico:
-                        resolved_lote_biologico = fefo_lote.numero_lote
-
-        if target_lote is not None:
-            if target_lote.cantidad_disponible < cant_dec:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Stock insuficiente en el lote '{target_lote.numero_lote}'. "
-                        f"Disponible: {target_lote.cantidad_disponible}, Dosis requerida: {cant_dec}"
-                    ),
-                )
-            target_lote.cantidad_disponible -= cant_dec
-
-        item.stock_actual -= cant_dec
-        mov_kardex = MovimientoInventario(
-            item_id=item.id,
-            lote_inventario_id=resolved_lote_id,
-            tipo_movimiento="salida_consumo",
+        lote_id_res, lote_num_res = await consumir_lotes_fefo(
+            db=db,
+            item=item,
             cantidad=cant_dec,
-            costo_unitario=item.costo_unitario,
             usuario_id=vet_id,
             motivo=f"Aplicación clínica ({body.tipo_evento}): {body.diagnostico or body.producto_nombre}",
             referencia_modulo="sanidad",
             referencia_id=tratamiento_id,
-            sync_status="synced",
+            target_lote=target_lote,
+            hoy=hoy,
         )
-        db.add(mov_kardex)
+        if lote_id_res is not None:
+            resolved_lote_id = lote_id_res
+        if not resolved_lote_biologico and lote_num_res:
+            resolved_lote_biologico = lote_num_res[:100]
 
     nuevo_tratamiento = SanidadTratamiento(
         id=tratamiento_id,

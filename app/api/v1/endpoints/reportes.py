@@ -4,6 +4,8 @@ Integra métricas de inventario/pesos (TimescaleDB), sanidad, reproducción,
 conversión alimenticia FCR (HU26) y auditoría de vacíos sanitarios (HU38).
 """
 
+import asyncio
+import html
 import io
 import uuid
 from datetime import date, datetime, timezone
@@ -18,10 +20,10 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, get_db
+from app.api.deps import get_current_user, get_db
 from app.models.animal import Animal
 from app.models.reproduccion import ReproduccionParto
 from app.models.sanidad import SanidadTratamiento
@@ -120,6 +122,15 @@ async def _collect_report_data(
         .order_by(ReproduccionParto.fecha_parto.desc())
         .limit(100)
     )
+    if corral_id:
+        partos_stmt = partos_stmt.where(
+            or_(
+                ReproduccionParto.corral_maternidad_id == corral_id,
+                ReproduccionParto.hembra_id.in_(
+                    select(Animal.id).where(Animal.corral_id == corral_id)
+                ),
+            )
+        )
     partos_rows = (await db.execute(partos_stmt)).scalars().all()
 
     alertas_vacios = sum(
@@ -283,6 +294,13 @@ async def _collect_report_data(
     }
 
 
+def _sanitize_excel_cell(value: Any) -> Any:
+    """Neutraliza prefijos de fórmulas en Excel/Calc para prevenir CSV/Formula Injection."""
+    if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{value}"
+    return value
+
+
 def _render_xlsx(payload: Dict[str, Any]) -> bytes:
     """Construye un libro Excel (.xlsx) formateado con openpyxl."""
     wb = Workbook()
@@ -308,7 +326,7 @@ def _render_xlsx(payload: Dict[str, Any]) -> bytes:
         headers = sec["headers"]
         row_start = 4
         for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=row_start, column=col_idx, value=h)
+            cell = ws.cell(row=row_start, column=col_idx, value=_sanitize_excel_cell(h))
             cell.fill = header_fill if sec["sheet"] == "Resumen KPIs" else sub_fill
             cell.font = white_bold
             cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -317,7 +335,7 @@ def _render_xlsx(payload: Dict[str, Any]) -> bytes:
         for r_offset, row_vals in enumerate(rows, start=1):
             r_num = row_start + r_offset
             for c_idx, val in enumerate(row_vals, start=1):
-                cell = ws.cell(row=r_num, column=c_idx, value=val)
+                cell = ws.cell(row=r_num, column=c_idx, value=_sanitize_excel_cell(val))
                 if r_offset % 2 == 0:
                     cell.fill = alt_fill
                 cell.alignment = Alignment(vertical="center")
@@ -352,30 +370,35 @@ def _render_pdf(payload: Dict[str, Any]) -> bytes:
     h1 = ParagraphStyle("PorciH1", parent=styles["Heading1"], fontSize=16, textColor=colors.HexColor("#0F172A"))
     h2 = ParagraphStyle("PorciH2", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#059669"), spaceBefore=10, spaceAfter=4)
     meta_style = ParagraphStyle("PorciMeta", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#475569"))
+    header_style = ParagraphStyle("PorciHdr", parent=styles["Normal"], fontSize=8, leading=10, textColor=colors.white, fontName="Helvetica-Bold")
+    cell_style = ParagraphStyle("PorciCell", parent=styles["Normal"], fontSize=7.5, leading=9.5, textColor=colors.HexColor("#0F172A"))
 
     story: List[Any] = [
-        Paragraph(f"PORCITECH 4.0 — Reporte Oficial ({payload['tipo'].upper()})", h1),
+        Paragraph(f"PORCITECH 4.0 — Reporte Oficial ({html.escape(str(payload['tipo']).upper())})", h1),
         Paragraph(
-            f"Período: {payload['fecha_inicio']} al {payload['fecha_fin']} | Emitido: {payload['generado_en']}",
+            f"Período: {html.escape(str(payload['fecha_inicio']))} al {html.escape(str(payload['fecha_fin']))} | Emitido: {html.escape(str(payload['generado_en']))}",
             meta_style,
         ),
         Spacer(1, 10),
     ]
 
+    usable_width = landscape(letter)[0] - 56.0
     for sec in payload["sections"]:
-        story.append(Paragraph(sec["title"], h2))
+        story.append(Paragraph(html.escape(sec["title"]), h2))
         headers = sec["headers"]
         rows = sec["rows"] or [["Sin registros en el período"] + [""] * (len(headers) - 1)]
-        table_data = [headers] + [[str(v) for v in row] for row in rows]
+        table_data = [[Paragraph(html.escape(str(h)), header_style) for h in headers]] + [
+            [Paragraph(html.escape(str(v if v is not None else "")), cell_style) for v in row]
+            for row in rows
+        ]
+        col_widths = [usable_width / max(len(headers), 1)] * len(headers)
 
-        tbl = Table(table_data, repeatRows=1)
+        tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
         tbl.setStyle(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
                     ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -403,17 +426,17 @@ async def exportar_reporte_oficial(
     fecha_fin: Optional[date] = Query(None, description="Fecha final YYYY-MM-DD"),
     corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral"),
     db: AsyncSession = Depends(get_db),
-    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+    current_user: Usuario = Depends(get_current_user),
 ):
     payload = await _collect_report_data(db, tipo, fecha_inicio, fecha_fin, corral_id)
     fecha_slug = datetime.now(timezone.utc).strftime("%Y%m%d")
 
     if formato == "xlsx":
-        content = _render_xlsx(payload)
+        content = await asyncio.to_thread(_render_xlsx, payload)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         filename = f"porcitech_{tipo}_{fecha_slug}.xlsx"
     else:
-        content = _render_pdf(payload)
+        content = await asyncio.to_thread(_render_pdf, payload)
         media_type = "application/pdf"
         filename = f"porcitech_{tipo}_{fecha_slug}.pdf"
 

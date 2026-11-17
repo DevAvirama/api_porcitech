@@ -343,7 +343,7 @@ async def update_corral(
             corral.fecha_cierre = date.today()
 
     if "fecha_cierre" in update_data:
-        corral.fecha_cierre = update_data["fecha_cierre"] or date.today()
+        corral.fecha_cierre = update_data["fecha_cierre"]
 
     await db.commit()
     await db.refresh(corral)
@@ -358,7 +358,7 @@ async def update_corral(
 async def delete_corral(
     id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
 ):
     query = select(Corral).where(Corral.id == id, Corral.deleted_at.is_(None))
     result = await db.execute(query)

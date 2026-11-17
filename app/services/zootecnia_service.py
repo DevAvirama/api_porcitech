@@ -5,14 +5,17 @@ Reutilizado por los endpoints de alimentación, corrales y exportación de repor
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import HTTPException, status
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.alimentacion import AlimentacionPlan, AlimentacionRacion
 from app.models.animal import Animal
 from app.models.corral import Corral
+from app.models.inventario import InventarioItem, InventarioLote, MovimientoInventario
 from app.schemas.alimentacion import ConversionAlimenticiaItem
 from app.schemas.corral import AuditoriaVacioItem
 
@@ -282,3 +285,140 @@ async def obtener_auditoria_vacios(
         )
         for r in rows
     ]
+
+
+async def consumir_lotes_fefo(
+    db: AsyncSession,
+    item: InventarioItem,
+    cantidad: Decimal,
+    usuario_id: uuid.UUID,
+    motivo: str,
+    referencia_modulo: str,
+    referencia_id: uuid.UUID,
+    target_lote: Optional[InventarioLote] = None,
+    hoy: Optional[date] = None,
+) -> Tuple[Optional[uuid.UUID], Optional[str]]:
+    """
+    Descuenta inventario aplicando regla FEFO multi-lote (HU30),
+    bloqueando lotes vencidos y registrando salidas en Kardex por cada lote consumido.
+    """
+    fecha_ref = hoy or date.today()
+
+    if target_lote is not None:
+        if target_lote.fecha_vencimiento and target_lote.fecha_vencimiento < fecha_ref:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Operación bloqueada (HU30 / Normativa ICA): El lote '{target_lote.numero_lote}' "
+                    f"venció el {target_lote.fecha_vencimiento.isoformat()}."
+                ),
+            )
+        if target_lote.cantidad_disponible < cantidad:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Stock insuficiente en el lote '{target_lote.numero_lote}'. "
+                    f"Disponible: {target_lote.cantidad_disponible}, Requerido: {cantidad}"
+                ),
+            )
+        target_lote.cantidad_disponible -= cantidad
+        item.stock_actual -= cantidad
+        db.add(
+            MovimientoInventario(
+                item_id=item.id,
+                lote_inventario_id=target_lote.id,
+                tipo_movimiento="salida_consumo",
+                cantidad=cantidad,
+                costo_unitario=item.costo_unitario,
+                usuario_id=usuario_id,
+                motivo=motivo,
+                referencia_modulo=referencia_modulo,
+                referencia_id=referencia_id,
+                sync_status="synced",
+            )
+        )
+        return target_lote.id, target_lote.numero_lote
+
+    lotes_query = (
+        select(InventarioLote)
+        .where(
+            InventarioLote.item_id == item.id,
+            InventarioLote.deleted_at.is_(None),
+            InventarioLote.cantidad_disponible > 0,
+        )
+        .order_by(InventarioLote.fecha_vencimiento.asc().nullslast())
+        .with_for_update(of=InventarioLote)
+    )
+    lotes_con_stock = (await db.execute(lotes_query)).scalars().all()
+
+    if not lotes_con_stock:
+        item.stock_actual -= cantidad
+        db.add(
+            MovimientoInventario(
+                item_id=item.id,
+                lote_inventario_id=None,
+                tipo_movimiento="salida_consumo",
+                cantidad=cantidad,
+                costo_unitario=item.costo_unitario,
+                usuario_id=usuario_id,
+                motivo=motivo,
+                referencia_modulo=referencia_modulo,
+                referencia_id=referencia_id,
+                sync_status="synced",
+            )
+        )
+        return None, None
+
+    lotes_vigentes = [
+        l for l in lotes_con_stock
+        if l.fecha_vencimiento is None or l.fecha_vencimiento >= fecha_ref
+    ]
+    if not lotes_vigentes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Operación bloqueada (HU30 / Normativa ICA): Todos los lotes disponibles de '{item.nombre}' "
+                "se encuentran vencidos. Registre un lote vigente antes de utilizarlo."
+            ),
+        )
+
+    total_vigente = sum((l.cantidad_disponible for l in lotes_vigentes), Decimal("0.00"))
+    if total_vigente < cantidad:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Stock vigente insuficiente para '{item.nombre}'. "
+                f"Disponible en lotes no vencidos: {total_vigente}, Requerido: {cantidad}"
+            ),
+        )
+
+    restante = cantidad
+    primer_lote_id: Optional[uuid.UUID] = None
+    lotes_usados: List[str] = []
+
+    for lote in lotes_vigentes:
+        if restante <= 0:
+            break
+        tomar = min(lote.cantidad_disponible, restante)
+        lote.cantidad_disponible -= tomar
+        restante -= tomar
+        if primer_lote_id is None:
+            primer_lote_id = lote.id
+        lotes_usados.append(lote.numero_lote)
+        db.add(
+            MovimientoInventario(
+                item_id=item.id,
+                lote_inventario_id=lote.id,
+                tipo_movimiento="salida_consumo",
+                cantidad=tomar,
+                costo_unitario=item.costo_unitario,
+                usuario_id=usuario_id,
+                motivo=f"{motivo} [Lote {lote.numero_lote}]",
+                referencia_modulo=referencia_modulo,
+                referencia_id=referencia_id,
+                sync_status="synced",
+            )
+        )
+
+    item.stock_actual -= cantidad
+    return primer_lote_id, (", ".join(lotes_usados) if lotes_usados else None)

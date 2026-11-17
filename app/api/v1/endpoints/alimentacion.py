@@ -19,7 +19,7 @@ from app.schemas.alimentacion import (
     AlimentacionRacionResponse,
     ConversionAlimenticiaItem,
 )
-from app.services.zootecnia_service import calcular_conversion_alimenticia
+from app.services.zootecnia_service import calcular_conversion_alimenticia, consumir_lotes_fefo
 
 router = APIRouter()
 
@@ -119,12 +119,22 @@ async def register_racion(
             detail=f"Stock insuficiente del alimento '{item.nombre}'. Disponible: {item.stock_actual} {item.unidad_medida}, Requerido: {unidades_descontar} {item.unidad_medida} ({cant_dec} kg)",
         )
 
-    item.stock_actual -= unidades_descontar
     costo_total = (unidades_descontar * item.costo_unitario).quantize(Decimal("0.01"))
 
     operario_id = await resolve_user_or_fallback(db, current_user, role="operario")
     fecha_sum = body.fecha_suministro or datetime.now(timezone.utc)
     racion_id = uuid.uuid4()
+
+    # Descontar stock en bodega y lotes vigentes bajo regla FEFO (HU30) + Kardex
+    await consumir_lotes_fefo(
+        db=db,
+        item=item,
+        cantidad=unidades_descontar,
+        usuario_id=operario_id,
+        motivo=f"Alimentación {body.fase_alimentacion} en corral {corral.codigo} ({cant_dec} kg)",
+        referencia_modulo="alimentacion",
+        referencia_id=racion_id,
+    )
 
     nueva_racion = AlimentacionRacion(
         id=racion_id,
@@ -139,20 +149,6 @@ async def register_racion(
         sync_status="synced",
     )
     db.add(nueva_racion)
-
-    # Registrar salida en Kardex vinculada a la ración
-    mov_kardex = MovimientoInventario(
-        item_id=item.id,
-        tipo_movimiento="salida_consumo",
-        cantidad=unidades_descontar,
-        costo_unitario=item.costo_unitario,
-        usuario_id=operario_id,
-        motivo=f"Alimentación {body.fase_alimentacion} en corral {corral.codigo} ({cant_dec} kg)",
-        referencia_modulo="alimentacion",
-        referencia_id=racion_id,
-        sync_status="synced",
-    )
-    db.add(mov_kardex)
     await db.commit()
 
     # Recargar con relaciones en una sola consulta

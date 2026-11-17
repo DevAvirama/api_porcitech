@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -72,7 +74,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         result = await db.execute(text("SELECT 1"))
         result.scalar()
         from app.vision.pipeline import cargar_calibracion_persistente
-        calib = cargar_calibracion_persistente()
+        calib = await asyncio.to_thread(cargar_calibracion_persistente)
         return {
             "status": "online",
             "database": "connected",

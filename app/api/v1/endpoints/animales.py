@@ -6,7 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, require_roles
 from app.models.animal import Animal
 from app.models.corral import Corral
 from app.models.user import Usuario
@@ -323,7 +323,7 @@ async def update_animal(
 async def delete_animal(
     id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
 ):
     query = select(Animal).where(Animal.id == id, Animal.deleted_at.is_(None))
     result = await db.execute(query)

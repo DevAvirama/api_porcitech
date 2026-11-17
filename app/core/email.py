@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -49,6 +50,8 @@ async def send_password_reset_email(
 ) -> Tuple[bool, str]:
     """Prepara y despacha en segundo plano el correo de restablecimiento de contraseña."""
     subject = "PorciTech — Recuperación de contraseña"
+    safe_name = html.escape(user_name, quote=True)
+    safe_url = html.escape(reset_url, quote=True)
     text_body = (
         f"Hola {user_name},\n\n"
         f"Recibimos una solicitud para restablecer tu contraseña en PorciTech.\n"
@@ -63,10 +66,10 @@ async def send_password_reset_email(
         <h2 style="margin: 0; font-size: 20px;">PorciTech — Recuperación de acceso</h2>
       </div>
       <div style="border: 1px solid #e2e8f0; border-top: none; padding: 24px; border-radius: 0 0 14px 14px;">
-        <p>Hola <strong>{user_name}</strong>,</p>
+        <p>Hola <strong>{safe_name}</strong>,</p>
         <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta en <strong>PorciTech</strong>.</p>
         <p style="margin: 24px 0;">
-          <a href="{reset_url}" style="background: #059669; color: #ffffff; padding: 12px 22px; text-decoration: none; border-radius: 10px; font-weight: bold;">
+          <a href="{safe_url}" style="background: #059669; color: #ffffff; padding: 12px 22px; text-decoration: none; border-radius: 10px; font-weight: bold;">
             Restablecer mi contraseña
           </a>
         </p>
@@ -74,7 +77,7 @@ async def send_password_reset_email(
           Este enlace caduca en <strong>{expires_minutes} minutos</strong> y queda invalidado automáticamente tras su uso.
         </p>
         <p style="font-size: 12px; color: #64748b; word-break: break-all;">
-          Si el botón no funciona, copia y pega esta URL en tu navegador:<br/>{reset_url}
+          Si el botón no funciona, copia y pega esta URL en tu navegador:<br/>{safe_url}
         </p>
       </div>
     </div>

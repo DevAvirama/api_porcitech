@@ -1,5 +1,7 @@
+import re
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from urllib.parse import urlparse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,6 +103,23 @@ async def logout(
     return {"message": f"Sesión de {current_user.email} finalizada exitosamente"}
 
 
+def _resolve_safe_frontend_base_url(request: Request) -> str:
+    """Valida la cabecera Origin contra orígenes confiables para evitar Header Poisoning."""
+    fallback = settings.FRONTEND_BASE_URL.rstrip("/")
+    raw_origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not raw_origin:
+        return fallback
+    parsed = urlparse(raw_origin)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.path or parsed.query:
+        return fallback
+    normalized = f"{parsed.scheme}://{parsed.netloc}"
+    if normalized in [o.rstrip("/") for o in settings.CORS_ORIGINS]:
+        return normalized
+    if settings.CORS_ORIGIN_REGEX and re.fullmatch(settings.CORS_ORIGIN_REGEX, normalized):
+        return normalized
+    return fallback
+
+
 @router.post(
     "/forgot-password",
     response_model=ForgotPasswordResponse,
@@ -113,6 +132,7 @@ async def logout(
 async def forgot_password(
     payload: ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> ForgotPasswordResponse:
     email_clean = str(payload.email).strip().lower()
@@ -143,25 +163,25 @@ async def forgot_password(
         expires_minutes=expires_min,
     )
 
-    origin = request.headers.get("origin")
-    base_url = (origin or settings.FRONTEND_BASE_URL).rstrip("/")
+    base_url = _resolve_safe_frontend_base_url(request)
     reset_url = f"{base_url}/reset-password?token={reset_token}"
 
     user_name = f"{user.nombre} {user.apellido}".strip() or user.email
-    email_sent, _ = await send_password_reset_email(
+    background_tasks.add_task(
+        send_password_reset_email,
         to_email=user.email,
         user_name=user_name,
         reset_url=reset_url,
         expires_minutes=expires_min,
     )
 
-    is_dev = settings.ENVIRONMENT.lower() in ("development", "dev", "local")
+    smtp_configured = bool(settings.SMTP_HOST and settings.SMTP_HOST.strip())
     return ForgotPasswordResponse(
         message=generic_msg,
         expires_in_minutes=expires_min,
-        email_sent=email_sent,
-        reset_url_preview=reset_url if (is_dev and not email_sent) else None,
-        reset_token_preview=reset_token if (is_dev and not email_sent) else None,
+        email_sent=smtp_configured,
+        reset_url_preview=None,
+        reset_token_preview=None,
     )
 
 

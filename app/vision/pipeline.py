@@ -2,6 +2,8 @@ import base64
 import json
 import logging
 import os
+import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,6 +15,9 @@ from ultralytics import YOLO
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_CALIBRATION_LOCK = threading.Lock()
+_YOLO_INFER_LOCK = threading.Lock()
 
 DEFAULT_REF_WIDTH = settings.DEFAULT_REF_WIDTH
 DEFAULT_PIXELS_PER_CM_AT_1280 = settings.DEFAULT_PIXELS_PER_CM_AT_1280
@@ -42,14 +47,16 @@ def _resolve_calibration_path() -> Path:
 def cargar_calibracion_persistente() -> Optional[Dict[str, Any]]:
     """Carga los parámetros persistidos de calibración métrica ArUco desde disco."""
     calib_path = _resolve_calibration_path()
-    if calib_path.exists():
-        try:
-            with open(calib_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and data.get("pixels_per_cm_base1280"):
-                return data
-        except Exception as exc:
-            logger.warning("No se pudo leer calibración persistente %s: %s", calib_path, exc)
+    with _CALIBRATION_LOCK:
+        if calib_path.exists():
+            try:
+                with open(calib_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                ppc = float(data.get("pixels_per_cm_base1280", 0) or 0)
+                if isinstance(data, dict) and ppc > 0:
+                    return data
+            except Exception as exc:
+                logger.warning("No se pudo leer calibración persistente %s: %s", calib_path, exc)
     return None
 
 
@@ -60,7 +67,7 @@ def guardar_calibracion_persistente(
     resolucion: str,
     diccionario: str = "DICT_4X4_100",
 ) -> Dict[str, Any]:
-    """Persiste la calibración métrica ArUco en weights/calibracion_camara.json."""
+    """Persiste atómicamente la calibración métrica ArUco en weights/calibracion_camara.json."""
     calib_path = _resolve_calibration_path()
     calib_path.parent.mkdir(parents=True, exist_ok=True)
     datos = {
@@ -73,9 +80,62 @@ def guardar_calibracion_persistente(
         "fecha_calibracion": datetime.now(timezone.utc).isoformat(),
         "estado": "calibrado",
     }
-    with open(calib_path, "w", encoding="utf-8") as f:
-        json.dump(datos, f, indent=2, ensure_ascii=False)
+    with _CALIBRATION_LOCK:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(calib_path.parent),
+            prefix=".calib_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(datos, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, calib_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
     return datos
+
+
+def resolve_pig_class_ids(model: Any) -> Optional[List[int]]:
+    """Resuelve los IDs de clase correspondientes a porcino en el modelo YOLO."""
+    names = getattr(model, "names", None)
+    if isinstance(names, dict):
+        matched = [
+            int(k)
+            for k, v in names.items()
+            if "pig" in str(v).lower() or "cerdo" in str(v).lower() or "porcin" in str(v).lower()
+        ]
+        return matched if matched else None
+    if isinstance(names, (list, tuple)):
+        matched = [
+            idx
+            for idx, v in enumerate(names)
+            if "pig" in str(v).lower() or "cerdo" in str(v).lower() or "porcin" in str(v).lower()
+        ]
+        return matched if matched else None
+    return None
+
+
+def predict_yolo_safe(
+    model: Any,
+    source: np.ndarray,
+    conf: float = 0.45,
+    imgsz: Optional[int] = None,
+) -> Any:
+    """Ejecuta model.predict protegido por lock de hilos y filtrado por clase porcina."""
+    pig_classes = resolve_pig_class_ids(model)
+    kwargs: Dict[str, Any] = {"source": source, "conf": conf, "verbose": False}
+    if imgsz is not None:
+        kwargs["imgsz"] = imgsz
+    if pig_classes is not None:
+        kwargs["classes"] = pig_classes
+    with _YOLO_INFER_LOCK:
+        return model.predict(**kwargs)
 
 
 def decodificar_bytes_imagen_sync(file_bytes: bytes) -> np.ndarray:
@@ -276,9 +336,11 @@ def ejecutar_inferencia_morfometrica_sync(
 
     factor_resolucion = ancho_orig / float(DEFAULT_REF_WIDTH)
     pixels_per_cm_efectivo = base_ppc * factor_resolucion
+    if pixels_per_cm_efectivo <= 0:
+        raise ValueError("El factor de calibración pixels_per_cm debe ser mayor a 0.")
 
-    # 2. Segmentación dorsal con YOLO
-    resultados = model.predict(source=img_bgr, conf=conf_threshold, verbose=False)
+    # 2. Segmentación dorsal con YOLO (thread-safe)
+    resultados = predict_yolo_safe(model, img_bgr, conf=conf_threshold)
     if not resultados or len(resultados[0].boxes) == 0:
         raise ValueError("No se detectó ningún ejemplar porcino en la imagen.")
 
@@ -341,7 +403,12 @@ def ejecutar_inferencia_morfometrica_sync(
             ratio_aspecto,
         ] + momentos_hu
 
-        est = _estimar_peso_hibrido(xgb_model, vector_xgboost, area_cm2)
+        # Solo usar XGBoost cuando existe máscara real de segmentación (evita alimentar Hu=[0]*7)
+        est = _estimar_peso_hibrido(
+            xgb_model if contorno_pts is not None else None,
+            vector_xgboost,
+            area_cm2,
+        )
 
         candidatos.append(
             {

@@ -648,9 +648,10 @@ SELECT
         ELSE NULL
     END AS dias_vacio_sanitario,
     CASE
-        WHEN fecha_salida_lote_anterior IS NULL THEN 'primer_ciclo'
-        WHEN (fecha_entrada - fecha_salida_lote_anterior) < dias_vacio_requerido THEN 'alerta_vacio_insuficiente'
+        WHEN lote_anterior IS NOT NULL AND fecha_salida_lote_anterior IS NULL THEN 'alerta_vacio_insuficiente'
+        WHEN fecha_salida_lote_anterior IS NOT NULL AND (fecha_entrada - fecha_salida_lote_anterior) < dias_vacio_requerido THEN 'alerta_vacio_insuficiente'
         WHEN NOT desinfeccion_verificada THEN 'pendiente_desinfeccion'
+        WHEN fecha_salida_lote_anterior IS NULL THEN 'primer_ciclo'
         ELSE 'cumple_protocolo'
     END AS estado_auditoria
 FROM ciclos_ordenados;

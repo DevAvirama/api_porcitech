@@ -9,7 +9,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import asyncpg
 from dotenv import load_dotenv
@@ -28,8 +28,8 @@ DATABASE_URL = os.getenv(
 clean_url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 parsed = urlparse(clean_url)
 
-DB_USER = parsed.username or "postgres"
-DB_PASSWORD = parsed.password or "postgres"
+DB_USER = unquote(parsed.username) if parsed.username else "postgres"
+DB_PASSWORD = unquote(parsed.password) if parsed.password else "postgres"
 DB_HOST = parsed.hostname or "localhost"
 DB_PORT = parsed.port or 5432
 TARGET_DB = parsed.path.lstrip("/") or "porcitech_db"

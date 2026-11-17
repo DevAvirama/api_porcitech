@@ -29,7 +29,8 @@ class PesajeCamaraRTSPRequest(BaseModel):
     id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
     corral_id: UUID = Field(..., description="UUID del corral del cerdo")
     rtsp_url: Optional[str] = Field(None, description="URL RTSP de la cámara Dahua TPC-BF")
-    pixels_per_cm: Optional[float] = None
+    pixels_per_cm: Optional[float] = Field(None, gt=1.0, le=100.0)
+    tamano_marcador_cm: float = Field(10.0, gt=1.0, le=100.0)
     validar_bordes: bool = False
     persistir: bool = True
 
@@ -38,17 +39,17 @@ class PesajeCapturaEnVivoRequest(BaseModel):
     id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
     corral_id: UUID = Field(..., description="UUID del corral del cerdo")
     persistir: bool = True
-    pixels_per_cm: Optional[float] = None
+    pixels_per_cm: Optional[float] = Field(None, gt=1.0, le=100.0)
     validar_bordes: bool = False
-    channel: Optional[int] = 1
-    subtype: Optional[int] = 0
+    channel: Optional[int] = Field(1, ge=1, le=2)
+    subtype: Optional[int] = Field(0, ge=0, le=1)
 
 
 class DahuaStreamConfigRequest(BaseModel):
-    camera_ip: Optional[str] = None
-    camera_port: Optional[int] = None
-    camera_user: Optional[str] = None
-    camera_password: Optional[str] = None
+    camera_ip: Optional[str] = Field(None, min_length=3, max_length=120)
+    camera_port: Optional[int] = Field(None, ge=1, le=65535)
+    camera_user: Optional[str] = Field(None, max_length=64)
+    camera_password: Optional[str] = Field(None, max_length=128)
     channel: Optional[int] = Field(None, ge=1, le=2)
     subtype: Optional[int] = Field(None, ge=0, le=1)
     pixels_per_cm: Optional[float] = Field(None, gt=1.0, le=100.0)

@@ -28,7 +28,20 @@ async def lifespan(app: FastAPI):
             
             # Se instancia UNA SOLA VEZ en memoria global de la app
             app.state.yolo_model = YOLO(resolved_weights)
-            logger.info("✅ Modelo YOLO dorsal cargado exitosamente en app.state.yolo_model")
+            from app.vision.pipeline import resolve_pig_class_ids
+            pig_ids = resolve_pig_class_ids(app.state.yolo_model)
+            model_names = getattr(app.state.yolo_model, "names", {})
+            if pig_ids is None:
+                logger.warning(
+                    "⚠️ El modelo YOLO cargado (%s) no expone la clase 'pig' (clases=%s). Verifique weights/best.pt.",
+                    resolved_weights,
+                    model_names,
+                )
+            else:
+                logger.info(
+                    "✅ Modelo YOLO dorsal cargado exitosamente en app.state.yolo_model (clases porcino=%s)",
+                    pig_ids,
+                )
 
             # Warmup ligero: inicializa grafos/kernels para que la primera petición no pague la latencia
             try:
@@ -89,9 +102,12 @@ async def lifespan(app: FastAPI):
 
         if app.state.yolo_model is not None:
             dahua_stream_manager.set_model(app.state.yolo_model, app.state.yolo_lock, app.state.xgb_model)
-        calib = cargar_calibracion_persistente()
+        calib = await asyncio.to_thread(cargar_calibracion_persistente)
         if calib and calib.get("pixels_per_cm_base1280"):
-            dahua_stream_manager.update_config(pixels_per_cm=float(calib["pixels_per_cm_base1280"]))
+            await asyncio.to_thread(
+                dahua_stream_manager.update_config,
+                pixels_per_cm=float(calib["pixels_per_cm_base1280"]),
+            )
             logger.info(
                 "📏 Calibración ArUco cargada desde disco: %s px/cm (marcador ID %s).",
                 calib.get("pixels_per_cm_base1280"),
@@ -108,7 +124,7 @@ async def lifespan(app: FastAPI):
     # Liberación de memoria del modelo y detención de streams
     try:
         from app.vision.dahua_stream import dahua_stream_manager
-        dahua_stream_manager.stop()
+        await asyncio.to_thread(dahua_stream_manager.stop)
     except Exception:
         pass
 

@@ -10,9 +10,9 @@ pyjwt>=2.8.0
 passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.1,<4.1.0
 email-validator>=2.1.0
-opencv-python-headless
+opencv-python-headless>=4.8.0,<5.0.0
 numpy
 ultralytics
-xgboost>=2.0.0
+xgboost>=3.4.0,<4.0.0
 openpyxl>=3.1.0
 reportlab>=4.1.0

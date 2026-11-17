@@ -13,7 +13,8 @@ from app.models.sanidad import (
     EjecucionBioseguridad,
     SanidadTratamiento,
 )
-from app.models.alimentacion import AlimentacionRacion
+from app.models.alimentacion import AlimentacionPlan, AlimentacionRacion
+from app.models.corral import Corral, CorralCicloSanitario
 from app.models.reproduccion import (
     ReproduccionServicio,
     ReproduccionParto,
@@ -23,6 +24,7 @@ from app.models.reproduccion import (
 __all__ = [
     "Usuario",
     "Corral",
+    "CorralCicloSanitario",
     "Animal",
     "RegistroPeso",
     "InventarioCategoria",
@@ -32,6 +34,7 @@ __all__ = [
     "ProtocoloBioseguridad",
     "EjecucionBioseguridad",
     "SanidadTratamiento",
+    "AlimentacionPlan",
     "AlimentacionRacion",
     "ReproduccionServicio",
     "ReproduccionParto",
