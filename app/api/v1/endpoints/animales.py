@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user, get_db, require_roles
 from app.models.animal import Animal
 from app.models.corral import Corral
@@ -195,6 +196,7 @@ async def create_animal(
     current_user: Usuario = Depends(get_current_user),
 ) -> AnimalResponse:
     if animal_in.id_local:
+        await lock_id_local(db, animal_in.id_local)
         idem_q = (
             select(Animal)
             .options(joinedload(Animal.corral))

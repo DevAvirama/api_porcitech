@@ -15,6 +15,7 @@ from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.core.config import settings
 from app.core.security import decode_access_token
@@ -632,6 +633,7 @@ async def create_pesaje_manual(
     await resolve_user_or_fallback(db, current_user, role="operario")
 
     if pesaje_in.id_local:
+        await lock_id_local(db, pesaje_in.id_local)
         idem_res = await db.execute(
             select(RegistroPeso).where(RegistroPeso.id_local == pesaje_in.id_local).limit(1)
         )

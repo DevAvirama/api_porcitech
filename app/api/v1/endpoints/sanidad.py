@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
@@ -230,6 +231,7 @@ async def create_tratamiento(
         )
 
     if body.id_local:
+        await lock_id_local(db, body.id_local)
         idem_t = (
             select(SanidadTratamiento)
             .where(SanidadTratamiento.id_local == body.id_local, SanidadTratamiento.deleted_at.is_(None))

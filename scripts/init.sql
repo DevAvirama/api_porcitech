@@ -608,6 +608,33 @@ CREATE TABLE IF NOT EXISTS corrales_ciclos_sanitarios (
 );
 CREATE INDEX IF NOT EXISTS idx_ciclos_corral_entrada ON corrales_ciclos_sanitarios (corral_id, fecha_entrada DESC) WHERE deleted_at IS NULL;
 
+-- =====================================================================================
+-- IDEMPOTENCIA OFFLINE-FIRST: índices únicos parciales sobre id_local (UUID del móvil)
+-- Segunda barrera tras pg_advisory_xact_lock en la API (app/core/idempotency.py).
+-- registro_pesos se excluye: es hipertabla TimescaleDB y un índice único exigiría
+-- incluir la columna de partición `tiempo`; allí la protección es el candado de la API.
+-- Si una base existente ya contiene duplicados, se emite un NOTICE y el arranque continúa.
+-- =====================================================================================
+DO $$
+DECLARE
+    t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'corrales', 'animales', 'sanidad_tratamientos', 'alimentacion_raciones',
+        'reproduccion_servicios', 'reproduccion_partos', 'reproduccion_destetes'
+    ]
+    LOOP
+        BEGIN
+            EXECUTE format(
+                'CREATE UNIQUE INDEX IF NOT EXISTS %I ON %I (id_local) WHERE id_local IS NOT NULL AND deleted_at IS NULL',
+                'uq_' || t || '_id_local', t
+            );
+        EXCEPTION WHEN unique_violation THEN
+            RAISE NOTICE 'No se creó uq_%_id_local: existen id_local duplicados en %. Depúrelos y reinicie.', t, t;
+        END;
+    END LOOP;
+END $$;
+
 CREATE OR REPLACE VIEW vista_auditoria_vacios_corral AS
 WITH ciclos_ordenados AS (
     SELECT

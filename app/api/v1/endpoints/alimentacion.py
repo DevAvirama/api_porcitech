@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user_optional, get_db, require_roles, resolve_user_or_fallback
 from app.models.alimentacion import AlimentacionPlan, AlimentacionRacion
 from app.models.corral import Corral
@@ -77,6 +78,7 @@ async def register_racion(
     descontando stock disponible en bodega/silo con su correspondiente movimiento Kardex.
     """
     if body.id_local:
+        await lock_id_local(db, body.id_local)
         idem_r = (
             select(AlimentacionRacion)
             .where(AlimentacionRacion.id_local == body.id_local, AlimentacionRacion.deleted_at.is_(None))

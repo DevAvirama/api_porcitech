@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
@@ -142,6 +143,7 @@ async def create_servicio(
     Registra un nuevo servicio de monta natural o inseminación artificial.
     """
     if body.id_local:
+        await lock_id_local(db, body.id_local)
         idem_s = (
             select(ReproduccionServicio)
             .where(ReproduccionServicio.id_local == body.id_local, ReproduccionServicio.deleted_at.is_(None))
@@ -300,6 +302,7 @@ async def create_parto(
     Registra un parto asistido vinculado opcionalmente a su servicio de monta/inseminación.
     """
     if body.id_local:
+        await lock_id_local(db, body.id_local)
         idem_p = (
             select(ReproduccionParto)
             .where(ReproduccionParto.id_local == body.id_local, ReproduccionParto.deleted_at.is_(None))
@@ -421,6 +424,7 @@ async def create_destete(
     Registra el destete de una camada, calculando los días de lactancia transcurridos.
     """
     if body.id_local:
+        await lock_id_local(db, body.id_local)
         idem_d = (
             select(ReproduccionDestete)
             .where(ReproduccionDestete.id_local == body.id_local, ReproduccionDestete.deleted_at.is_(None))

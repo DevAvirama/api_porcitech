@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.idempotency import lock_id_local
 from app.api.deps import get_current_user, get_db, require_roles
 from app.models.animal import Animal
 from app.models.corral import Corral, CorralCicloSanitario
@@ -243,6 +244,7 @@ async def create_corral(
     current_user: Usuario = Depends(get_current_user),
 ) -> CorralResponse:
     if corral_in.id_local:
+        await lock_id_local(db, corral_in.id_local)
         idem_corral = (
             select(Corral)
             .where(Corral.id_local == corral_in.id_local, Corral.deleted_at.is_(None))
