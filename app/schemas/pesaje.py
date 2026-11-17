@@ -149,9 +149,10 @@ class PesajeManualCreate(BaseModel):
     id_cerdo: UUID = Field(..., description="UUID del cerdo pesado")
     corral_id: UUID = Field(..., description="UUID del corral actual del cerdo")
     peso_kg: float = Field(..., gt=0, description="Peso registrado en kilogramos")
-    metodo: Optional[str] = Field("manual", description="Método utilizado ('manual' o 'bascula_digital')")
+    metodo: Optional[str] = Field("manual", description="Método utilizado ('manual', 'bascula_digital' o 'vision_ai')")
     tiempo: Optional[datetime] = Field(None, description="Marca de tiempo del pesaje (opcional, por omisión hora actual)")
     observaciones: Optional[str] = Field(None, description="Observaciones adicionales")
+    id_local: Optional[UUID] = Field(None, description="UUID v4 local para idempotencia offline")
 
 
 class PesajeResponse(BaseModel):

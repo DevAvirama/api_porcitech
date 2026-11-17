@@ -141,6 +141,22 @@ async def create_servicio(
     """
     Registra un nuevo servicio de monta natural o inseminación artificial.
     """
+    if body.id_local:
+        idem_s = (
+            select(ReproduccionServicio)
+            .where(ReproduccionServicio.id_local == body.id_local, ReproduccionServicio.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_s = (await db.execute(idem_s)).unique().scalar_one_or_none()
+        if existing_s:
+            return _to_servicio_response(existing_s)
+
+    if body.macho_id and body.macho_id == body.hembra_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La hembra y el macho del servicio deben ser ejemplares distintos.",
+        )
+
     # Validar hembra
     h_query = select(Animal).where(Animal.id == body.hembra_id, Animal.deleted_at.is_(None))
     h_res = await db.execute(h_query)
@@ -173,6 +189,7 @@ async def create_servicio(
         estado_confirmacion=body.estado_confirmacion or "pendiente",
         fecha_diagnostico=body.fecha_diagnostico,
         observaciones=body.observaciones,
+        id_local=body.id_local,
         sync_status="synced",
     )
     db.add(nuevo_servicio)
@@ -282,6 +299,16 @@ async def create_parto(
     """
     Registra un parto asistido vinculado opcionalmente a su servicio de monta/inseminación.
     """
+    if body.id_local:
+        idem_p = (
+            select(ReproduccionParto)
+            .where(ReproduccionParto.id_local == body.id_local, ReproduccionParto.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_p = (await db.execute(idem_p)).unique().scalar_one_or_none()
+        if existing_p:
+            return _to_parto_response(existing_p)
+
     # Validar hembra
     h_query = select(Animal).where(Animal.id == body.hembra_id, Animal.deleted_at.is_(None))
     h_res = await db.execute(h_query)
@@ -335,6 +362,7 @@ async def create_parto(
         momias=body.momias,
         peso_camada_total_kg=Decimal(str(body.peso_camada_total_kg or 0.0)),
         observaciones=body.observaciones,
+        id_local=body.id_local,
         sync_status="synced",
     )
     db.add(nuevo_parto)
@@ -392,6 +420,16 @@ async def create_destete(
     """
     Registra el destete de una camada, calculando los días de lactancia transcurridos.
     """
+    if body.id_local:
+        idem_d = (
+            select(ReproduccionDestete)
+            .where(ReproduccionDestete.id_local == body.id_local, ReproduccionDestete.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_d = (await db.execute(idem_d)).unique().scalar_one_or_none()
+        if existing_d:
+            return _to_destete_response(existing_d)
+
     # Validar hembra
     h_query = select(Animal).where(Animal.id == body.hembra_id, Animal.deleted_at.is_(None))
     h_res = await db.execute(h_query)
@@ -447,6 +485,7 @@ async def create_destete(
         peso_total_kg=Decimal(str(body.peso_total_kg)),
         dias_lactancia=calculated_lactancia,
         observaciones=body.observaciones,
+        id_local=body.id_local,
         sync_status="synced",
     )
     db.add(nuevo_destete)

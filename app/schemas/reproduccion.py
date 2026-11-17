@@ -16,7 +16,7 @@ class ReproduccionServicioBase(BaseModel):
 
 
 class ReproduccionServicioCreate(ReproduccionServicioBase):
-    pass
+    id_local: Optional[UUID] = None
 
 
 class ServicioUpdate(BaseModel):
@@ -62,7 +62,7 @@ class ReproduccionPartoBase(BaseModel):
 
 
 class ReproduccionPartoCreate(ReproduccionPartoBase):
-    pass
+    id_local: Optional[UUID] = None
 
 
 class ReproduccionPartoResponse(BaseModel):
@@ -101,7 +101,7 @@ class ReproduccionDesteteBase(BaseModel):
 
 
 class ReproduccionDesteteCreate(ReproduccionDesteteBase):
-    pass
+    id_local: Optional[UUID] = None
 
 
 class ReproduccionDesteteResponse(BaseModel):

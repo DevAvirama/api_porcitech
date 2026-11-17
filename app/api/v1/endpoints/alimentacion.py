@@ -76,6 +76,16 @@ async def register_racion(
     Registra el suministro de alimento en un corral, calculando costos y
     descontando stock disponible en bodega/silo con su correspondiente movimiento Kardex.
     """
+    if body.id_local:
+        idem_r = (
+            select(AlimentacionRacion)
+            .where(AlimentacionRacion.id_local == body.id_local, AlimentacionRacion.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_r = (await db.execute(idem_r)).scalar_one_or_none()
+        if existing_r:
+            return _to_racion_response(existing_r)
+
     # Validar corral
     c_query = select(Corral).where(Corral.id == body.corral_id, Corral.deleted_at.is_(None))
     c_res = await db.execute(c_query)
@@ -146,6 +156,7 @@ async def register_racion(
         fecha_suministro=fecha_sum,
         costo_total=costo_total,
         observaciones=body.observaciones,
+        id_local=body.id_local,
         sync_status="synced",
     )
     db.add(nueva_racion)

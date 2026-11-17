@@ -14,6 +14,7 @@ class CorralBase(BaseModel):
 
 class CorralCreate(CorralBase):
     fecha_inicio: Optional[date] = Field(None, description="Fecha de asignación o inicio de lote")
+    id_local: Optional[uuid.UUID] = Field(None, description="UUID v4 local para idempotencia offline")
 
 
 class CorralUpdate(BaseModel):

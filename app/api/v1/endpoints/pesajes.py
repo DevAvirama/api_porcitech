@@ -631,6 +631,35 @@ async def create_pesaje_manual(
 ) -> PesajeResponse:
     await resolve_user_or_fallback(db, current_user, role="operario")
 
+    if pesaje_in.id_local:
+        idem_res = await db.execute(
+            select(RegistroPeso).where(RegistroPeso.id_local == pesaje_in.id_local).limit(1)
+        )
+        existing_peso = idem_res.scalar_one_or_none()
+        if existing_peso:
+            animal_ex = await db.get(Animal, existing_peso.id_cerdo)
+            corral_ex = await db.get(Corral, existing_peso.corral_id)
+            return PesajeResponse(
+                id_registro=existing_peso.id_registro,
+                tiempo=existing_peso.tiempo,
+                id_cerdo=existing_peso.id_cerdo,
+                corral_id=existing_peso.corral_id,
+                peso_kg=float(existing_peso.peso_kg),
+                metodo=existing_peso.metodo,
+                confianza_ia=float(existing_peso.confianza_ia) if existing_peso.confianza_ia is not None else None,
+                area_cm2=float(existing_peso.area_cm2) if existing_peso.area_cm2 is not None else None,
+                largo_cm=float(existing_peso.largo_cm) if existing_peso.largo_cm is not None else None,
+                ancho_cm=float(existing_peso.ancho_cm) if existing_peso.ancho_cm is not None else None,
+                bbox=existing_peso.bbox,
+                foto_evidencia_url=existing_peso.foto_evidencia_url,
+                observaciones=existing_peso.observaciones,
+                sync_status=existing_peso.sync_status,
+                created_at=existing_peso.created_at,
+                cerdo_alias=animal_ex.nombre_alias if animal_ex else None,
+                cerdo_arete=animal_ex.codigo_arete if animal_ex else None,
+                corral_codigo=corral_ex.codigo if corral_ex else None,
+            )
+
     # 1. Validar existencia del animal
     animal = await db.get(Animal, pesaje_in.id_cerdo)
     if not animal or animal.deleted_at is not None:
@@ -649,7 +678,13 @@ async def create_pesaje_manual(
 
     # 3. Formatear y persistir registro en TimescaleDB
     tiempo_pesaje = pesaje_in.tiempo or datetime.now(timezone.utc)
-    metodo_val = pesaje_in.metodo if pesaje_in.metodo in ["manual", "bascula_digital", "vision_ai"] else "manual"
+    raw_metodo = (pesaje_in.metodo or "manual").strip().lower()
+    if raw_metodo == "ia_vision":
+        metodo_val = "vision_ai"
+    elif raw_metodo in ("manual", "bascula_digital", "vision_ai"):
+        metodo_val = raw_metodo
+    else:
+        metodo_val = "manual"
     nuevo_id = uuid.uuid4()
 
     nuevo_registro = RegistroPeso(
@@ -660,6 +695,7 @@ async def create_pesaje_manual(
         peso_kg=float(pesaje_in.peso_kg),
         metodo=metodo_val,
         observaciones=pesaje_in.observaciones,
+        id_local=pesaje_in.id_local,
         sync_status="synced",
     )
     db.add(nuevo_registro)

@@ -51,6 +51,7 @@ class SanidadTratamientoCreate(BaseModel):
     fecha_tratamiento: Optional[datetime] = None
     fecha_proxima_dosis: Optional[date] = None
     observaciones: Optional[str] = None
+    id_local: Optional[UUID] = None
 
 
 class SanidadTratamientoResponse(BaseModel):
@@ -75,6 +76,7 @@ class SanidadTratamientoResponse(BaseModel):
     fecha_tratamiento: datetime
     fecha_proxima_dosis: Optional[date] = None
     observaciones: Optional[str] = None
+    id_local: Optional[UUID] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -242,6 +242,22 @@ async def create_corral(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> CorralResponse:
+    if corral_in.id_local:
+        idem_corral = (
+            select(Corral)
+            .where(Corral.id_local == corral_in.id_local, Corral.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_idem = (await db.execute(idem_corral)).scalar_one_or_none()
+        if existing_idem:
+            occ_q = select(func.count(Animal.id)).where(
+                Animal.corral_id == existing_idem.id,
+                Animal.deleted_at.is_(None),
+                Animal.estado.notin_(ESTADOS_INACTIVOS_CORRAL),
+            )
+            occ = int((await db.execute(occ_q)).scalar() or 0)
+            return _to_corral_response(existing_idem, occ)
+
     codigo_clean = corral_in.codigo.strip()
 
     # Validar código único
@@ -263,6 +279,7 @@ async def create_corral(
         capacidad_maxima=corral_in.capacidad_maxima,
         fecha_inicio=corral_in.fecha_inicio or date.today(),
         activo=corral_in.activo if corral_in.activo is not None else True,
+        id_local=corral_in.id_local,
         sync_status="synced",
     )
     db.add(corral)

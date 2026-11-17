@@ -41,6 +41,7 @@ class AnimalCreate(AnimalBase):
     foto_url: Optional[str] = Field(None, description="URL de la fotografía del animal")
     id_padre: Optional[uuid.UUID] = Field(None, description="UUID del progenitor macho")
     id_madre: Optional[uuid.UUID] = Field(None, description="UUID de la progenitora hembra")
+    id_local: Optional[uuid.UUID] = Field(None, description="UUID v4 local para idempotencia offline")
 
     @model_validator(mode="after")
     def auto_generate_qr(self):

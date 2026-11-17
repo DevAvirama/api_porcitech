@@ -11,6 +11,7 @@ class AlimentacionRacionCreate(BaseModel):
     cantidad_kg: float = Field(..., gt=0, description="Cantidad en kilogramos")
     fecha_suministro: Optional[datetime] = None
     observaciones: Optional[str] = None
+    id_local: Optional[UUID] = None
 
 
 class AlimentacionRacionResponse(BaseModel):

@@ -229,6 +229,16 @@ async def create_tratamiento(
             detail="Debe especificar al menos un animal (animal_id) o un corral (corral_id) para el tratamiento sanitario.",
         )
 
+    if body.id_local:
+        idem_t = (
+            select(SanidadTratamiento)
+            .where(SanidadTratamiento.id_local == body.id_local, SanidadTratamiento.deleted_at.is_(None))
+            .limit(1)
+        )
+        existing_t = (await db.execute(idem_t)).scalar_one_or_none()
+        if existing_t:
+            return _to_tratamiento_response(existing_t)
+
     # Validar animal si fue provisto
     if body.animal_id:
         a_query = select(Animal).where(Animal.id == body.animal_id, Animal.deleted_at.is_(None))
@@ -345,6 +355,7 @@ async def create_tratamiento(
         fecha_tratamiento=fecha_trata,
         fecha_proxima_dosis=body.fecha_proxima_dosis,
         observaciones=body.observaciones,
+        id_local=body.id_local,
         sync_status="synced",
     )
     db.add(nuevo_tratamiento)

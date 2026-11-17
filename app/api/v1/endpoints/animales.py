@@ -131,15 +131,15 @@ async def get_animal_by_qr(
 ) -> AnimalResponse:
     clean_code = codigo_qr.strip()
 
-    # Búsqueda principal por código QR
+    # Búsqueda principal por código QR o arete (insensible a mayúsculas/minúsculas)
     query = (
         select(Animal)
         .options(joinedload(Animal.corral))
         .where(
             Animal.deleted_at.is_(None),
             or_(
-                Animal.codigo_qr == clean_code,
-                Animal.codigo_arete == clean_code,
+                func.lower(Animal.codigo_qr) == clean_code.lower(),
+                func.lower(Animal.codigo_arete) == clean_code.lower(),
             ),
         )
     )
@@ -194,6 +194,17 @@ async def create_animal(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ) -> AnimalResponse:
+    if animal_in.id_local:
+        idem_q = (
+            select(Animal)
+            .options(joinedload(Animal.corral))
+            .where(Animal.id_local == animal_in.id_local, Animal.deleted_at.is_(None))
+            .limit(1)
+        )
+        idem_existing = (await db.execute(idem_q)).scalar_one_or_none()
+        if idem_existing:
+            return AnimalResponse.model_validate(idem_existing)
+
     arete_clean = animal_in.codigo_arete.strip()
     qr_clean = animal_in.codigo_qr.strip() if animal_in.codigo_qr else f"QR-{arete_clean}"
 
@@ -231,6 +242,7 @@ async def create_animal(
         foto_url=animal_in.foto_url,
         id_padre=animal_in.id_padre,
         id_madre=animal_in.id_madre,
+        id_local=animal_in.id_local,
     )
 
     db.add(animal)
