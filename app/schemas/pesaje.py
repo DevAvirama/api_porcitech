@@ -84,10 +84,19 @@ class PesajeVisionResponse(BaseModel):
     fuente: str = Field(..., description="'archivo' o 'camara_rtsp'")
     peso_estimado_kg: float
     peso_estimado: Optional[float] = None
+    algoritmo_peso: Optional[str] = Field(None, description="'xgboost' o 'alomorfico_huxley'")
+    peso_huxley_referencia_kg: Optional[float] = None
+    metodo_calibracion: Optional[str] = Field(
+        None, description="'aruco_en_vivo' | 'manual_parametro' | 'aruco_guardado' | 'fabrica_cenital'"
+    )
+    pixels_per_cm_utilizado: Optional[float] = None
+    aruco_detectado: bool = False
+    aruco_id: Optional[int] = None
     confianza: float
     area_cm2: float
     largo_cm: float
     ancho_cm: float
+    ancho_toracico_cm: Optional[float] = None
     bbox: Optional[Dict[str, Any]] = None
     imagen_anotada_base64: Optional[str] = None
     persistido: bool = False
@@ -101,6 +110,31 @@ class PesajeVisionResponse(BaseModel):
         if self.peso_estimado is None:
             self.peso_estimado = self.peso_estimado_kg
         return self
+
+
+class CalibracionArUcoResponse(BaseModel):
+    status: str = "ok"
+    mensaje: str
+    pixels_per_cm_base1280: float
+    pixels_per_cm_medido: float
+    tamano_marcador_cm: float
+    marcador_id: int
+    diccionario_aruco: str
+    resolucion_captura: str
+    fecha_calibracion: str
+    imagen_anotada_base64: str
+
+
+class CalibracionEstadoResponse(BaseModel):
+    calibrado: bool
+    pixels_per_cm_base1280: float
+    tamano_marcador_cm: Optional[float] = None
+    marcador_id: Optional[int] = None
+    diccionario_aruco: Optional[str] = None
+    resolucion_calibracion: Optional[str] = None
+    fecha_calibracion: Optional[str] = None
+    yolo_activo: bool
+    xgboost_activo: bool
 
 
 class PesajeDeleteResponse(BaseModel):

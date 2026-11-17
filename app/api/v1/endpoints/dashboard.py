@@ -332,6 +332,27 @@ async def get_dashboard_alerts(
                 WHERE deleted_at IS NULL AND stock_actual <= stock_minimo
             ) AS items_criticos,
             (
+                SELECT COUNT(*)
+                FROM inventario_lotes l
+                JOIN inventario_items i ON l.item_id = i.id
+                WHERE l.deleted_at IS NULL
+                  AND i.deleted_at IS NULL
+                  AND l.cantidad_disponible > 0
+                  AND l.fecha_vencimiento IS NOT NULL
+                  AND l.fecha_vencimiento < CURRENT_DATE
+            ) AS lotes_vencidos,
+            (
+                SELECT COUNT(*)
+                FROM inventario_lotes l
+                JOIN inventario_items i ON l.item_id = i.id
+                WHERE l.deleted_at IS NULL
+                  AND i.deleted_at IS NULL
+                  AND l.cantidad_disponible > 0
+                  AND l.fecha_vencimiento IS NOT NULL
+                  AND l.fecha_vencimiento >= CURRENT_DATE
+                  AND l.fecha_vencimiento <= (CURRENT_DATE + INTERVAL '30 days')
+            ) AS lotes_por_vencer,
+            (
                 SELECT COUNT(DISTINCT s.hembra_id)
                 FROM reproduccion_servicios s
                 JOIN animales a ON s.hembra_id = a.id
@@ -348,6 +369,8 @@ async def get_dashboard_alerts(
 
     animales_en_retiro = int(row.get("animales_en_retiro") or 0)
     items_criticos = int(row.get("items_criticos") or 0)
+    lotes_vencidos = int(row.get("lotes_vencidos") or 0)
+    lotes_por_vencer = int(row.get("lotes_por_vencer") or 0)
     hembras_por_parir = int(row.get("hembras_por_parir") or 0)
 
     if animales_en_retiro > 0:
@@ -358,6 +381,28 @@ async def get_dashboard_alerts(
                 modulo="sanidad",
                 mensaje=f"{animales_en_retiro} animales con tiempo de retiro farmacológico activo.",
                 accion_sugerida="Verificar en módulo de sanidad antes de programar beneficio o faenado.",
+            )
+        )
+
+    if lotes_vencidos > 0:
+        alerts.append(
+            DashboardAlertItem(
+                id="alert-inventario-vencidos",
+                nivel="danger",
+                modulo="inventario",
+                mensaje=f"{lotes_vencidos} {'lote vencido' if lotes_vencidos == 1 else 'lotes vencidos'} con existencias en bodega.",
+                accion_sugerida="Retirar de circulación y dar de baja en Kardex; su uso está bloqueado en vacunaciones.",
+            )
+        )
+
+    if lotes_por_vencer > 0:
+        alerts.append(
+            DashboardAlertItem(
+                id="alert-inventario-vencimiento-30d",
+                nivel="warning",
+                modulo="inventario",
+                mensaje=f"{lotes_por_vencer} {'lote próximo' if lotes_por_vencer == 1 else 'lotes próximos'} a vencer en los próximos 30 días.",
+                accion_sugerida="Priorizar rotación FEFO (primero en vencer, primero en salir) o planificar reposición.",
             )
         )
 

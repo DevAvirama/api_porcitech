@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
 from app.models.animal import Animal
 from app.models.corral import Corral
-from app.models.inventario import InventarioItem, MovimientoInventario
+from app.models.inventario import InventarioItem, InventarioLote, MovimientoInventario
 from app.models.sanidad import (
     EjecucionBioseguridad,
     ProtocoloBioseguridad,
@@ -248,8 +248,44 @@ async def create_tratamiento(
     vet_id = await resolve_user_or_fallback(db, current_user, role="veterinario")
     fecha_trata = body.fecha_tratamiento or datetime.now(timezone.utc)
     tratamiento_id = uuid.uuid4()
+    hoy = date.today()
+    resolved_lote_id = body.lote_inventario_id
+    resolved_lote_biologico = body.lote_biologico.strip() if body.lote_biologico else None
+    target_lote: Optional[InventarioLote] = None
 
-    # Si se asocia medicamento del inventario, descontar stock de bodega
+    # Validación HU30: Nunca permitir usar un lote vencido en vacunaciones o tratamientos
+    if body.lote_inventario_id:
+        lote_query = (
+            select(InventarioLote)
+            .where(
+                InventarioLote.id == body.lote_inventario_id,
+                InventarioLote.deleted_at.is_(None),
+            )
+            .with_for_update(of=InventarioLote)
+        )
+        target_lote = (await db.execute(lote_query)).scalar_one_or_none()
+        if not target_lote:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Lote de inventario con id '{body.lote_inventario_id}' no encontrado",
+            )
+        if body.medicamento_id and target_lote.item_id != body.medicamento_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El lote '{target_lote.numero_lote}' no corresponde al medicamento seleccionado.",
+            )
+        if target_lote.fecha_vencimiento is not None and target_lote.fecha_vencimiento < hoy:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Operación bloqueada (HU30 / Normativa ICA): El lote '{target_lote.numero_lote}' "
+                    f"venció el {target_lote.fecha_vencimiento.isoformat()}. No está permitido aplicar productos vencidos."
+                ),
+            )
+        if not resolved_lote_biologico:
+            resolved_lote_biologico = target_lote.numero_lote
+
+    # Si se asocia medicamento del inventario, validar lotes vigentes y descontar stock de bodega
     if body.medicamento_id and body.dosis and body.dosis > 0:
         item_query = (
             select(InventarioItem)
@@ -271,10 +307,55 @@ async def create_tratamiento(
                 detail=f"Stock insuficiente del medicamento '{item.nombre}'. Disponible: {item.stock_actual}, Dosis requerida: {cant_dec}",
             )
 
+        # Si no se especificó lote explícito, verificar lotes registrados (regla FEFO y bloqueo si todos están vencidos)
+        if target_lote is None:
+            lotes_item_query = (
+                select(InventarioLote)
+                .where(
+                    InventarioLote.item_id == item.id,
+                    InventarioLote.deleted_at.is_(None),
+                    InventarioLote.cantidad_disponible > 0,
+                )
+                .order_by(InventarioLote.fecha_vencimiento.asc().nullslast())
+                .with_for_update(of=InventarioLote)
+            )
+            lotes_con_stock = (await db.execute(lotes_item_query)).scalars().all()
+            if lotes_con_stock:
+                lotes_vigentes = [
+                    l for l in lotes_con_stock
+                    if l.fecha_vencimiento is None or l.fecha_vencimiento >= hoy
+                ]
+                if not lotes_vigentes:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Operación bloqueada (HU30 / Normativa ICA): Todos los lotes disponibles de '{item.nombre}' "
+                            f"se encuentran vencidos. Registre una entrada con un lote vigente antes de aplicar."
+                        ),
+                    )
+                # Seleccionar automáticamente el primer lote vigente con saldo suficiente (FEFO)
+                fefo_lote = next((l for l in lotes_vigentes if l.cantidad_disponible >= cant_dec), None)
+                if fefo_lote is not None:
+                    target_lote = fefo_lote
+                    resolved_lote_id = fefo_lote.id
+                    if not resolved_lote_biologico:
+                        resolved_lote_biologico = fefo_lote.numero_lote
+
+        if target_lote is not None:
+            if target_lote.cantidad_disponible < cant_dec:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Stock insuficiente en el lote '{target_lote.numero_lote}'. "
+                        f"Disponible: {target_lote.cantidad_disponible}, Dosis requerida: {cant_dec}"
+                    ),
+                )
+            target_lote.cantidad_disponible -= cant_dec
+
         item.stock_actual -= cant_dec
         mov_kardex = MovimientoInventario(
             item_id=item.id,
-            lote_inventario_id=body.lote_inventario_id,
+            lote_inventario_id=resolved_lote_id,
             tipo_movimiento="salida_consumo",
             cantidad=cant_dec,
             costo_unitario=item.costo_unitario,
@@ -292,8 +373,8 @@ async def create_tratamiento(
         corral_id=body.corral_id,
         veterinario_id=vet_id,
         medicamento_id=body.medicamento_id,
-        lote_inventario_id=body.lote_inventario_id,
-        lote_biologico=body.lote_biologico.strip() if body.lote_biologico else None,
+        lote_inventario_id=resolved_lote_id,
+        lote_biologico=resolved_lote_biologico,
         tipo_evento=body.tipo_evento,
         producto_nombre=body.producto_nombre.strip(),
         diagnostico=body.diagnostico.strip() if body.diagnostico else None,

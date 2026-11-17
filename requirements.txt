@@ -13,3 +13,4 @@ email-validator>=2.1.0
 opencv-python-headless
 numpy
 ultralytics
+xgboost>=2.0.0

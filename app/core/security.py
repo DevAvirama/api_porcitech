@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 import jwt
@@ -60,3 +61,41 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
         return payload
     except jwt.PyJWTError:
         return None
+
+
+def compute_password_fingerprint(password_hash: str) -> str:
+    """Genera una huella corta del hash actual para invalidar tokens de recuperación tras su primer uso."""
+    return hashlib.sha256((password_hash or "").encode("utf-8")).hexdigest()[:16]
+
+
+def create_password_reset_token(
+    user_id: str,
+    email: str,
+    password_hash: str,
+    expires_minutes: Optional[int] = None,
+) -> str:
+    """
+    Crea un token JWT temporal de un solo uso para restablecimiento de contraseña (HU02).
+    """
+    minutes = expires_minutes or settings.PASSWORD_RESET_EXPIRE_MINUTES
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=minutes)
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "purpose": "password_reset",
+        "pwd_fp": compute_password_fingerprint(password_hash),
+        "iat": now,
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_password_reset_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decodifica y valida que el token corresponda a un flujo vigente de password_reset."""
+    payload = decode_access_token(token)
+    if not payload or payload.get("purpose") != "password_reset":
+        return None
+    if not payload.get("sub") or not payload.get("pwd_fp"):
+        return None
+    return payload

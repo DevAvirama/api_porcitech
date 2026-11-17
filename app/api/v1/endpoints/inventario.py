@@ -1,6 +1,7 @@
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from app.models.inventario import (
 )
 from app.models.user import Usuario
 from app.schemas.inventario import (
+    AlertaVencimientoLoteResponse,
     InventarioCategoriaResponse,
     InventarioItemCreate,
     InventarioItemDetailResponse,
@@ -25,6 +27,20 @@ from app.schemas.inventario import (
 )
 
 router = APIRouter()
+
+
+def _compute_lote_expiry(
+    fecha_vencimiento: Optional[date],
+    umbral_dias: int = 30,
+) -> Tuple[Optional[int], str]:
+    if not fecha_vencimiento:
+        return None, "sin_fecha"
+    dias = (fecha_vencimiento - date.today()).days
+    if dias < 0:
+        return dias, "vencido"
+    if dias <= umbral_dias:
+        return dias, "proximo_vencer"
+    return dias, "vigente"
 
 
 def _to_item_response(
@@ -188,27 +204,87 @@ async def get_item_detail(id: uuid.UUID, db: AsyncSession = Depends(get_db)):
             detail=f"Insumo con id '{id}' no encontrado",
         )
 
-    lotes_resp = [
-        InventarioLoteResponse(
-            id=l.id,
-            item_id=l.item_id,
-            numero_lote=l.numero_lote,
-            fecha_fabricacion=l.fecha_fabricacion,
-            fecha_vencimiento=l.fecha_vencimiento,
-            cantidad_inicial=float(l.cantidad_inicial),
-            cantidad_actual=float(l.cantidad_disponible),
-            cantidad_disponible=float(l.cantidad_disponible),
-            registro_ica=l.registro_ica,
-            created_at=l.created_at,
+    lotes_resp = []
+    for l in sorted(
+        [lt for lt in item.lotes if lt.deleted_at is None],
+        key=lambda x: (x.fecha_vencimiento is None, x.fecha_vencimiento or date.max),
+    ):
+        dias_vencer, estado_v = _compute_lote_expiry(l.fecha_vencimiento)
+        lotes_resp.append(
+            InventarioLoteResponse(
+                id=l.id,
+                item_id=l.item_id,
+                numero_lote=l.numero_lote,
+                fecha_fabricacion=l.fecha_fabricacion,
+                fecha_vencimiento=l.fecha_vencimiento,
+                cantidad_inicial=float(l.cantidad_inicial),
+                cantidad_actual=float(l.cantidad_disponible),
+                cantidad_disponible=float(l.cantidad_disponible),
+                registro_ica=l.registro_ica,
+                dias_para_vencer=dias_vencer,
+                estado_vencimiento=estado_v,
+                created_at=l.created_at,
+            )
         )
-        for l in item.lotes
-    ]
 
     base_resp = _to_item_response(item)
     return InventarioItemDetailResponse(
         **base_resp.model_dump(),
         lotes=lotes_resp,
     )
+
+
+@router.get(
+    "/lotes/alertas-vencimiento",
+    response_model=List[AlertaVencimientoLoteResponse],
+    summary="Alertas de lotes vencidos y próximos a vencer (HU30)",
+    description="Retorna lotes con existencias disponibles que ya vencieron o vencen dentro de los próximos N días (por defecto 30).",
+)
+async def list_lotes_alertas_vencimiento(
+    dias: int = Query(30, ge=1, le=365, description="Ventana de alerta anticipada en días (regla por defecto: 30)"),
+    db: AsyncSession = Depends(get_db),
+):
+    hoy = date.today()
+    limite_fecha = hoy + timedelta(days=dias)
+
+    query = (
+        select(InventarioLote)
+        .options(joinedload(InventarioLote.item).joinedload(InventarioItem.categoria))
+        .join(InventarioItem, InventarioLote.item_id == InventarioItem.id)
+        .where(
+            InventarioLote.deleted_at.is_(None),
+            InventarioItem.deleted_at.is_(None),
+            InventarioLote.cantidad_disponible > 0,
+            InventarioLote.fecha_vencimiento.is_not(None),
+            InventarioLote.fecha_vencimiento <= limite_fecha,
+        )
+        .order_by(InventarioLote.fecha_vencimiento.asc())
+    )
+    result = await db.execute(query)
+    lotes = result.unique().scalars().all()
+
+    alertas: List[AlertaVencimientoLoteResponse] = []
+    for l in lotes:
+        dias_restantes = (l.fecha_vencimiento - hoy).days
+        estado = "vencido" if dias_restantes < 0 else "proximo_vencer"
+        item = l.item
+        alertas.append(
+            AlertaVencimientoLoteResponse(
+                id=l.id,
+                item_id=l.item_id,
+                item_nombre=item.nombre if item else "Insumo",
+                codigo_sku=item.codigo_sku if item else "--",
+                categoria_nombre=item.categoria.nombre if (item and item.categoria) else None,
+                numero_lote=l.numero_lote,
+                fecha_vencimiento=l.fecha_vencimiento,
+                dias_para_vencer=dias_restantes,
+                cantidad_disponible=float(l.cantidad_disponible),
+                unidad_medida=item.unidad_medida if item else "u",
+                registro_ica=l.registro_ica,
+                estado=estado,
+            )
+        )
+    return alertas
 
 
 

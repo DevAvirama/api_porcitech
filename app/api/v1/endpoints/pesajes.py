@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+import cv2
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, desc, func, select, text
@@ -18,6 +20,8 @@ from app.models.corral import Corral
 from app.models.pesaje import RegistroPeso
 from app.models.user import Usuario
 from app.schemas.pesaje import (
+    CalibracionArUcoResponse,
+    CalibracionEstadoResponse,
     DahuaLiveStatusResponse,
     DahuaStreamConfigRequest,
     GMDDiariaItem,
@@ -29,9 +33,14 @@ from app.schemas.pesaje import (
     PesajeVisionResponse,
 )
 from app.vision.pipeline import (
+    DEFAULT_MARKER_SIZE_CM,
+    DEFAULT_PIXELS_PER_CM_AT_1280,
     PESO_MAXIMO_FISIOLOGICO_KG,
+    cargar_calibracion_persistente,
     decodificar_bytes_imagen_sync,
+    detectar_marcador_aruco,
     ejecutar_inferencia_morfometrica_sync,
+    guardar_calibracion_persistente,
 )
 from app.vision.rtsp_client import capturar_fotograma_v380_sync
 from app.vision.dahua_stream import dahua_stream_manager
@@ -81,6 +90,15 @@ async def _persistir_pesaje_vision(
 
     tiempo = datetime.now(timezone.utc)
     nuevo_id = uuid.uuid4()
+    algoritmo = resultado.get("algoritmo_peso") or "alomorfico_huxley"
+    metodo_cal = resultado.get("metodo_calibracion") or "fabrica_cenital"
+    ppc_usado = resultado.get("pixels_per_cm_utilizado")
+    obs_ia = f"IA {algoritmo} | Calibración: {metodo_cal}"
+    if ppc_usado:
+        obs_ia += f" ({ppc_usado} px/cm)"
+    if resultado.get("aruco_detectado") and resultado.get("aruco_id") is not None:
+        obs_ia += f" | ArUco ID {resultado['aruco_id']}"
+
     db.add(
         RegistroPeso(
             tiempo=tiempo,
@@ -94,6 +112,7 @@ async def _persistir_pesaje_vision(
             largo_cm=resultado["largo_cm"],
             ancho_cm=resultado["ancho_cm"],
             bbox=resultado["bbox"],
+            observaciones=obs_ia,
             sync_status="synced",
         )
     )
@@ -105,32 +124,136 @@ async def _persistir_pesaje_vision(
 def _construir_respuesta_vision(
     resultado: Dict[str, Any], fuente: str, persistencia: Optional[Dict[str, Any]]
 ) -> PesajeVisionResponse:
+    algoritmo = resultado.get("algoritmo_peso") or "alomorfico_huxley"
+    metodo_cal = resultado.get("metodo_calibracion") or "fabrica_cenital"
     return PesajeVisionResponse(
         detectado=True,
         fuente=fuente,
         peso_estimado_kg=resultado["peso_estimado_kg"],
+        algoritmo_peso=algoritmo,
+        peso_huxley_referencia_kg=resultado.get("peso_huxley_referencia_kg"),
+        metodo_calibracion=metodo_cal,
+        pixels_per_cm_utilizado=resultado.get("pixels_per_cm_utilizado"),
+        aruco_detectado=bool(resultado.get("aruco_detectado", False)),
+        aruco_id=resultado.get("aruco_id"),
         confianza=resultado["confianza"],
         area_cm2=resultado["area_cm2"],
         largo_cm=resultado["largo_cm"],
         ancho_cm=resultado["ancho_cm"],
+        ancho_toracico_cm=resultado.get("ancho_toracico_cm"),
         bbox=resultado["bbox"],
         imagen_anotada_base64=resultado["imagen_anotada_base64"],
         persistido=persistencia is not None,
         id_registro_persistido=persistencia["id_registro"] if persistencia else None,
         tiempo_registro=persistencia["tiempo"] if persistencia else None,
         peso_actual_kg=persistencia["peso_actual_kg"] if persistencia else None,
-        mensaje="Detección dorsal y pesaje morfométrico exitoso.",
+        mensaje=f"Detección dorsal y pesaje biométrico exitoso ({algoritmo} · {metodo_cal}).",
     )
 
 
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
+@router.get(
+    "/calibracion",
+    response_model=CalibracionEstadoResponse,
+    summary="Estado de calibración ArUco y motores de IA (HU21)",
+    description="Retorna la escala espacial px/cm activa (ArUco persistido o fábrica) y estado de los modelos YOLO y XGBoost.",
+)
+async def obtener_estado_calibracion(request: Request) -> CalibracionEstadoResponse:
+    calib = cargar_calibracion_persistente()
+    yolo_ok = (getattr(request.app.state, "yolo_model", None) or getattr(request.app.state, "model", None)) is not None
+    xgb_ok = getattr(request.app.state, "xgb_model", None) is not None
+    if calib:
+        return CalibracionEstadoResponse(
+            calibrado=True,
+            pixels_per_cm_base1280=float(calib.get("pixels_per_cm_base1280", DEFAULT_PIXELS_PER_CM_AT_1280)),
+            tamano_marcador_cm=calib.get("tamano_marcador_cm"),
+            marcador_id=calib.get("marcador_id"),
+            diccionario_aruco=calib.get("diccionario_aruco", "DICT_4X4_100"),
+            resolucion_calibracion=calib.get("resolucion_calibracion"),
+            fecha_calibracion=calib.get("fecha_calibracion"),
+            yolo_activo=yolo_ok,
+            xgboost_activo=xgb_ok,
+        )
+    return CalibracionEstadoResponse(
+        calibrado=False,
+        pixels_per_cm_base1280=float(DEFAULT_PIXELS_PER_CM_AT_1280),
+        yolo_activo=yolo_ok,
+        xgboost_activo=xgb_ok,
+    )
+
+
+@router.post(
+    "/calibrar-aruco",
+    response_model=CalibracionArUcoResponse,
+    summary="Calibrar escala métrica cm/px con marcador ArUco (HU21)",
+    description="Detecta un marcador ArUco (DICT_4X4_100 / DICT_4X4_50) en una foto cenital, guarda calibracion_camara.json y actualiza el factor px/cm.",
+)
+async def calibrar_con_aruco(
+    file: UploadFile = File(..., description="Fotografía cenital con marcador ArUco visible"),
+    tamano_marcador_cm: float = Form(DEFAULT_MARKER_SIZE_CM, gt=1.0, le=100.0),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
+) -> CalibracionArUcoResponse:
+    await resolve_user_or_fallback(db, current_user, role="operario")
+    contenido = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
+    if not contenido:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo de imagen está vacío.")
+    if len(contenido) > MAX_IMAGE_UPLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="La imagen supera los 15 MB.")
+
+    try:
+        frame = await asyncio.to_thread(decodificar_bytes_imagen_sync, contenido)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    resultado = await asyncio.to_thread(detectar_marcador_aruco, frame, tamano_marcador_cm, None, True)
+    if resultado is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "No se detectó ningún marcador ArUco (DICT_4X4_100 / DICT_4X4_50) en la imagen. "
+                "Verifique iluminación, enfoque y que el marcador esté plano y completo."
+            ),
+        )
+
+    alto, ancho = frame.shape[:2]
+    resolucion_str = f"{ancho}x{alto}"
+    datos_guardados = guardar_calibracion_persistente(
+        pixels_per_cm_1280=resultado["pixels_per_cm_base1280"],
+        tamano_marcador_cm=tamano_marcador_cm,
+        marcador_id=resultado["marcador_id"],
+        resolucion=resolucion_str,
+        diccionario=resultado["diccionario"],
+    )
+    dahua_stream_manager.update_config(pixels_per_cm=resultado["pixels_per_cm_base1280"])
+
+    _, buffer_jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    img_b64 = f"data:image/jpeg;base64,{base64.b64encode(buffer_jpg).decode('utf-8')}"
+
+    return CalibracionArUcoResponse(
+        status="ok",
+        mensaje=(
+            f"Calibración ArUco exitosa (ID {resultado['marcador_id']} · {resultado['diccionario']}). "
+            f"Escala guardada: {resultado['pixels_per_cm_base1280']:.3f} px/cm (base 1280px)."
+        ),
+        pixels_per_cm_base1280=round(resultado["pixels_per_cm_base1280"], 3),
+        pixels_per_cm_medido=round(resultado["pixels_per_cm_medido"], 3),
+        tamano_marcador_cm=tamano_marcador_cm,
+        marcador_id=resultado["marcador_id"],
+        diccionario_aruco=resultado["diccionario"],
+        resolucion_captura=resolucion_str,
+        fecha_calibracion=datos_guardados["fecha_calibracion"],
+        imagen_anotada_base64=img_b64,
+    )
+
+
 @router.post(
     "/vision",
     response_model=PesajeVisionResponse,
     summary="Estimar peso desde fotografía (UploadFile)",
-    description="Decodifica la imagen en RAM, ejecuta YOLO con escala normalizada a 1280 px y persiste en registro_pesos.",
+    description="Decodifica la imagen en RAM, detecta ArUco para calibración cm/px, segmenta con YOLO y estima el peso con XGBoost/Huxley.",
 )
 async def estimar_peso_vision(
     request: Request,
@@ -138,6 +261,7 @@ async def estimar_peso_vision(
     id_cerdo: Optional[uuid.UUID] = Form(None),
     corral_id: Optional[uuid.UUID] = Form(None),
     pixels_per_cm: Optional[float] = Form(None),
+    tamano_marcador_cm: float = Form(DEFAULT_MARKER_SIZE_CM),
     persistir: bool = Form(True),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
@@ -148,6 +272,7 @@ async def estimar_peso_vision(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pixels_per_cm debe estar en (1, 100].")
 
     model = _obtener_modelo(request)
+    xgb_model = getattr(request.app.state, "xgb_model", None)
     contenido = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
     if not contenido:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo de imagen está vacío.")
@@ -163,11 +288,25 @@ async def estimar_peso_vision(
         if yolo_lock is not None:
             async with yolo_lock:
                 resultado = await asyncio.to_thread(
-                    ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
+                    ejecutar_inferencia_morfometrica_sync,
+                    model,
+                    img_bgr,
+                    pixels_per_cm,
+                    0.45,
+                    False,
+                    xgb_model,
+                    tamano_marcador_cm,
                 )
         else:
             resultado = await asyncio.to_thread(
-                ejecutar_inferencia_morfometrica_sync, model, img_bgr, pixels_per_cm
+                ejecutar_inferencia_morfometrica_sync,
+                model,
+                img_bgr,
+                pixels_per_cm,
+                0.45,
+                False,
+                xgb_model,
+                tamano_marcador_cm,
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
@@ -315,6 +454,7 @@ async def estimar_peso_camara_rtsp(
         )
 
     model = _obtener_modelo(request)
+    xgb_model = getattr(request.app.state, "xgb_model", None)
     try:
         frame_bgr = await asyncio.to_thread(capturar_fotograma_v380_sync, rtsp_url)
     except (ConnectionError, ValueError) as exc:
@@ -331,6 +471,7 @@ async def estimar_peso_camara_rtsp(
                     payload.pixels_per_cm,
                     0.35,
                     payload.validar_bordes,
+                    xgb_model,
                 )
         else:
             resultado = await asyncio.to_thread(
@@ -340,6 +481,7 @@ async def estimar_peso_camara_rtsp(
                 payload.pixels_per_cm,
                 0.35,
                 payload.validar_bordes,
+                xgb_model,
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
@@ -540,31 +682,55 @@ async def get_pesajes_by_animal(
     "/corral/{corral_id}/gmd",
     response_model=List[GMDDiariaItem],
     summary="Serie temporal de GMD por corral",
-    description="Consulta la vista continua de TimescaleDB con la evolución diaria de peso y Ganancia Media Diaria.",
+    description="Consulta la vista continua de TimescaleDB con la evolución diaria de peso y Ganancia Media Diaria, con filtro opcional por período.",
 )
 async def get_corral_gmd(
     corral_id: uuid.UUID,
     limite: int = Query(30, ge=1, le=365, description="Número máximo de días a consultar"),
+    fecha_inicio: Optional[date] = Query(None, description="Fecha inicial del período (YYYY-MM-DD)"),
+    fecha_fin: Optional[date] = Query(None, description="Fecha final del período (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ) -> List[GMDDiariaItem]:
+    start_dt = datetime.combine(fecha_inicio, time.min, tzinfo=timezone.utc) if fecha_inicio else None
+    end_dt = (
+        datetime.combine(fecha_fin, time.min, tzinfo=timezone.utc) + timedelta(days=1)
+        if fecha_fin
+        else None
+    )
+
+    params: Dict[str, Any] = {
+        "corral_id": str(corral_id),
+        "limite": limite,
+    }
+    date_filters = []
+    if start_dt is not None:
+        date_filters.append("fecha >= :start_dt")
+        params["start_dt"] = start_dt
+    if end_dt is not None:
+        date_filters.append("fecha < :end_dt")
+        params["end_dt"] = end_dt
+
+    extra_where_and = (" AND " + " AND ".join(date_filters)) if date_filters else ""
+    fallback_where = ("WHERE " + " AND ".join(date_filters)) if date_filters else ""
+
     # 1. Consulta primaria sobre la vista continua de TimescaleDB
     query = text(
-        """
+        f"""
         SELECT fecha, corral_id, total_pesajes, peso_promedio_kg, peso_minimo_kg, peso_maximo_kg, gmd_kg, variacion_porcentual
         FROM vista_gmd_diaria_corral
-        WHERE corral_id = :corral_id
+        WHERE corral_id = :corral_id{extra_where_and}
         ORDER BY fecha DESC
         LIMIT :limite;
         """
     )
-    result = await db.execute(query, {"corral_id": str(corral_id), "limite": limite})
+    result = await db.execute(query, params)
     rows = result.mappings().all()
 
     # 2. Si la vista analítica no tiene datos aún (por ventana de agregación), fallback dinámico sobre registro_pesos
     if not rows:
         fallback_query = text(
-            """
+            f"""
             WITH diarios AS (
                 SELECT 
                     date_trunc('day', tiempo) AS fecha,
@@ -605,11 +771,12 @@ async def get_corral_gmd(
             )
             SELECT fecha, corral_id, total_pesajes, peso_promedio_kg, peso_minimo_kg, peso_maximo_kg, gmd_kg, variacion_porcentual
             FROM con_gmd
+            {fallback_where}
             ORDER BY fecha DESC
             LIMIT :limite;
             """
         )
-        fallback_res = await db.execute(fallback_query, {"corral_id": str(corral_id), "limite": limite})
+        fallback_res = await db.execute(fallback_query, params)
         rows = fallback_res.mappings().all()
 
     return [

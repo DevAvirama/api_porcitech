@@ -41,9 +41,26 @@ class InventarioLoteResponse(BaseModel):
     cantidad_actual: float = 0.0
     cantidad_disponible: Optional[float] = 0.0
     registro_ica: Optional[str] = None
+    dias_para_vencer: Optional[int] = None
+    estado_vencimiento: Optional[str] = None  # 'vencido' | 'proximo_vencer' | 'vigente' | 'sin_fecha'
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AlertaVencimientoLoteResponse(BaseModel):
+    id: UUID
+    item_id: UUID
+    item_nombre: str
+    codigo_sku: str
+    categoria_nombre: Optional[str] = None
+    numero_lote: str
+    fecha_vencimiento: date
+    dias_para_vencer: int
+    cantidad_disponible: float
+    unidad_medida: str
+    registro_ica: Optional[str] = None
+    estado: str  # 'vencido' | 'proximo_vencer'
 
 
 class InventarioItemResponse(BaseModel):

@@ -77,14 +77,22 @@ class DahuaStreamManager:
             "timestamp": None,
         }
 
-        # Referencia al modelo YOLO (suministrada desde app.state)
+        # Referencia al modelo YOLO y XGBoost (suministrada desde app.state)
         self.yolo_model: Any = None
         self.yolo_lock: Optional[asyncio.Lock] = None
+        self.xgb_model: Any = None
 
-    def set_model(self, model: Any, yolo_lock: Optional[asyncio.Lock] = None):
-        """Asigna la instancia en memoria del modelo YOLO."""
+    def set_model(
+        self,
+        model: Any,
+        yolo_lock: Optional[asyncio.Lock] = None,
+        xgb_model: Any = None,
+    ):
+        """Asigna la instancia en memoria de los modelos YOLO y XGBoost."""
         self.yolo_model = model
         self.yolo_lock = yolo_lock
+        if xgb_model is not None:
+            self.xgb_model = xgb_model
 
     def update_config(
         self,
@@ -543,6 +551,7 @@ class DahuaStreamManager:
             pixels_per_cm_override=ppc,
             conf_threshold=0.35,
             validar_bordes=validar_bordes,
+            xgb_model=self.xgb_model,
         )
 
     def get_status(self) -> Dict[str, Any]:

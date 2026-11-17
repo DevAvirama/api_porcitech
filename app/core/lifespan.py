@@ -61,6 +61,45 @@ async def lifespan(app: FastAPI):
     # Alias canónico: misma instancia (no se recarga el modelo)
     app.state.model = app.state.yolo_model
 
+    # Carga del Modelo XGBoost para regresión biométrica de peso (HU21)
+    xgb_path = settings.XGBOOST_WEIGHTS_PATH
+    resolved_xgb = xgb_path if os.path.isabs(xgb_path) else os.path.join(backend_root, xgb_path)
+    app.state.xgb_model = None
+    if os.path.exists(resolved_xgb):
+        try:
+            import xgboost as xgb
+
+            booster = xgb.Booster()
+            booster.load_model(resolved_xgb)
+            app.state.xgb_model = booster
+            logger.info("✅ Modelo XGBoost cargado exitosamente desde: %s", resolved_xgb)
+        except Exception as xgb_exc:
+            logger.warning(
+                "⚠️ No se pudo cargar el modelo XGBoost desde %s (%s). Se usará ecuación alométrica de Huxley.",
+                resolved_xgb,
+                xgb_exc,
+            )
+    else:
+        logger.info("ℹ️ Modelo XGBoost no encontrado en %s; operando con ecuación alométrica de Huxley.", resolved_xgb)
+
+    # Vincular XGBoost y calibración persistente al gestor de streaming en vivo Dahua
+    try:
+        from app.vision.dahua_stream import dahua_stream_manager
+        from app.vision.pipeline import cargar_calibracion_persistente
+
+        if app.state.yolo_model is not None:
+            dahua_stream_manager.set_model(app.state.yolo_model, app.state.yolo_lock, app.state.xgb_model)
+        calib = cargar_calibracion_persistente()
+        if calib and calib.get("pixels_per_cm_base1280"):
+            dahua_stream_manager.update_config(pixels_per_cm=float(calib["pixels_per_cm_base1280"]))
+            logger.info(
+                "📏 Calibración ArUco cargada desde disco: %s px/cm (marcador ID %s).",
+                calib.get("pixels_per_cm_base1280"),
+                calib.get("marcador_id"),
+            )
+    except Exception as stream_exc:
+        logger.warning("⚠️ Aviso configurando DahuaStreamManager con XGBoost/ArUco: %s", stream_exc)
+
     yield
 
     # --- FASE DE APAGADO (SHUTDOWN) ---
@@ -76,6 +115,7 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "yolo_model"):
         app.state.yolo_model = None
     app.state.model = None
+    app.state.xgb_model = None
     
     # Cierre de conexiones a PostgreSQL / TimescaleDB
     await engine.dispose()

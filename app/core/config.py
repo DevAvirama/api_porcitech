@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     ]
     CORS_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|[a-zA-Z0-9-]+(\.local)?)(:\d+)?"
     YOLO_WEIGHTS_PATH: str = "weights/best.pt"
+    XGBOOST_WEIGHTS_PATH: str = "weights/modelo_peso_xgboost.json"
+    CAMERA_CALIBRATION_PATH: str = "weights/calibracion_camara.json"
+    ARUCO_MARKER_SIZE_CM: float = 10.0
 
     # =========================================================================
     # Configuración de Cámara Dahua TPC-BF (Bi-spectrum Térmica y Óptica)
@@ -41,6 +44,18 @@ class Settings(BaseSettings):
     COEF_ALOMETRICO_A: float = 0.0245
     EXPONENTE_ALOMETRICO_B: float = 1.052
     FACTOR_OCUPACION_DORSAL: float = 0.76
+
+    # =========================================================================
+    # Configuración SMTP Transaccional y Recuperación de Contraseña (HU02)
+    # =========================================================================
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "no-reply@porcitech.local"
+    SMTP_USE_TLS: bool = True
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+    PASSWORD_RESET_EXPIRE_MINUTES: int = 30
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

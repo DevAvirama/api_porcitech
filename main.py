@@ -71,11 +71,15 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     try:
         result = await db.execute(text("SELECT 1"))
         result.scalar()
+        from app.vision.pipeline import cargar_calibracion_persistente
+        calib = cargar_calibracion_persistente()
         return {
             "status": "online",
             "database": "connected",
             "service": f"{settings.PROJECT_NAME} v{settings.VERSION}",
             "ai_vision_loaded": hasattr(app.state, "yolo_model") and app.state.yolo_model is not None,
+            "xgboost_loaded": hasattr(app.state, "xgb_model") and app.state.xgb_model is not None,
+            "aruco_calibration_loaded": calib is not None,
         }
     except Exception as exc:
         logger.exception("Error de conectividad en /health: %s", exc)
