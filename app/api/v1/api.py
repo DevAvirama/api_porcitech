@@ -7,6 +7,7 @@ from app.api.v1.endpoints import (
     dashboard,
     inventario,
     pesajes,
+    reportes,
     reproduccion,
     sanidad,
     usuarios,
@@ -25,6 +26,7 @@ api_router.include_router(inventario.router, prefix="/inventario", tags=["Invent
 api_router.include_router(sanidad.router, prefix="/sanidad", tags=["Sanidad y Bioseguridad"])
 api_router.include_router(alimentacion.router, prefix="/alimentacion", tags=["Alimentación"])
 api_router.include_router(reproduccion.router, prefix="/reproduccion", tags=["Reproducción"])
+api_router.include_router(reportes.router, prefix="/reportes", tags=["Reportes Oficiales"])
 
 
 @api_router.get("/status", tags=["Sistema"])

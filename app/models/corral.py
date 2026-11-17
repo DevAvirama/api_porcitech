@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,3 +85,47 @@ class Corral(Base):
 
     def __repr__(self) -> str:
         return f"<Corral(id={self.id}, codigo='{self.codigo}', fase='{self.fase}', activo={self.activo})>"
+
+
+class CorralCicloSanitario(Base):
+    """Registro histórico de ocupación de lotes y vacíos sanitarios por corral (HU38)."""
+
+    __tablename__ = "corrales_ciclos_sanitarios"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    corral_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("corrales.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    codigo_lote: Mapped[str] = mapped_column(String(80), nullable=False)
+    fecha_entrada: Mapped[date] = mapped_column(Date, nullable=False)
+    fecha_salida: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    cantidad_animales: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dias_vacio_requerido: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    desinfeccion_verificada: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    responsable_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("usuarios.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")

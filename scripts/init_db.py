@@ -119,6 +119,8 @@ async def execute_init_sql():
             "ejecucion_bioseguridad",
             "sanidad_tratamientos",
             "alimentacion_raciones",
+            "alimentacion_planes",
+            "corrales_ciclos_sanitarios",
             "reproduccion_servicios",
             "reproduccion_partos",
             "reproduccion_destetes",

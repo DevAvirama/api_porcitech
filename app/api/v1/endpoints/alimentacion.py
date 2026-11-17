@@ -1,20 +1,25 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, get_db, resolve_user_or_fallback
-from app.models.alimentacion import AlimentacionRacion
+from app.api.deps import get_current_user_optional, get_db, require_roles, resolve_user_or_fallback
+from app.models.alimentacion import AlimentacionPlan, AlimentacionRacion
 from app.models.corral import Corral
 from app.models.inventario import InventarioItem, MovimientoInventario
 from app.models.user import Usuario
 from app.schemas.alimentacion import (
+    AlimentacionPlanCreate,
+    AlimentacionPlanResponse,
+    AlimentacionPlanUpdate,
     AlimentacionRacionCreate,
     AlimentacionRacionResponse,
+    ConversionAlimenticiaItem,
 )
+from app.services.zootecnia_service import calcular_conversion_alimenticia
 
 router = APIRouter()
 
@@ -156,4 +161,169 @@ async def register_racion(
     saved = fresh_res.scalar_one()
 
     return _to_racion_response(saved)
+
+
+def _to_plan_response(plan: AlimentacionPlan) -> AlimentacionPlanResponse:
+    creador = (
+        f"{plan.creador.nombre} {plan.creador.apellido}".strip() if plan.creador else None
+    )
+    return AlimentacionPlanResponse(
+        id=plan.id,
+        nombre=plan.nombre,
+        fase_alimentacion=plan.fase_alimentacion,
+        corral_id=plan.corral_id,
+        corral_codigo=plan.corral.codigo if plan.corral else None,
+        alimento_item_id=plan.alimento_item_id,
+        alimento_nombre=plan.alimento.nombre if plan.alimento else None,
+        cantidad_kg_por_animal=float(plan.cantidad_kg_por_animal),
+        frecuencia_diaria=plan.frecuencia_diaria,
+        fcr_objetivo=float(plan.fcr_objetivo) if plan.fcr_objetivo is not None else None,
+        activo=plan.activo,
+        creado_por_nombre=creador,
+        observaciones=plan.observaciones,
+        created_at=plan.created_at,
+    )
+
+
+@router.get("/planes", response_model=List[AlimentacionPlanResponse])
+async def list_planes_alimentacion(
+    corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar planes por corral"),
+    fase: Optional[str] = Query(None, description="Filtrar por fase alimenticia"),
+    solo_activos: bool = Query(True, description="Solo planes activos"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lista planes de alimentación estandarizados por etapa o corral (HU24)."""
+    stmt = (
+        select(AlimentacionPlan)
+        .where(AlimentacionPlan.deleted_at.is_(None))
+        .order_by(AlimentacionPlan.created_at.desc())
+    )
+    if corral_id:
+        stmt = stmt.where(AlimentacionPlan.corral_id == corral_id)
+    if fase:
+        stmt = stmt.where(func.lower(AlimentacionPlan.fase_alimentacion) == fase.strip().lower())
+    if solo_activos:
+        stmt = stmt.where(AlimentacionPlan.activo.is_(True))
+
+    plans = (await db.execute(stmt)).scalars().all()
+    return [_to_plan_response(p) for p in plans]
+
+
+@router.post("/planes", response_model=AlimentacionPlanResponse, status_code=status.HTTP_201_CREATED)
+async def create_plan_alimentacion(
+    body: AlimentacionPlanCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
+):
+    """Crea un plan de alimentación asignable a una fase o corral específico (HU24)."""
+    if body.corral_id:
+        corral_res = await db.execute(
+            select(Corral).where(Corral.id == body.corral_id, Corral.deleted_at.is_(None))
+        )
+        if not corral_res.scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Corral no encontrado.")
+
+    item_res = await db.execute(
+        select(InventarioItem).where(
+            InventarioItem.id == body.alimento_item_id, InventarioItem.deleted_at.is_(None)
+        )
+    )
+    if not item_res.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Insumo alimenticio no encontrado.")
+
+    nuevo_plan = AlimentacionPlan(
+        nombre=body.nombre.strip(),
+        fase_alimentacion=body.fase_alimentacion.strip(),
+        corral_id=body.corral_id,
+        alimento_item_id=body.alimento_item_id,
+        cantidad_kg_por_animal=Decimal(str(body.cantidad_kg_por_animal)),
+        frecuencia_diaria=body.frecuencia_diaria,
+        fcr_objetivo=Decimal(str(body.fcr_objetivo)) if body.fcr_objetivo is not None else None,
+        activo=body.activo,
+        creado_por=current_user.id,
+        observaciones=body.observaciones,
+    )
+    db.add(nuevo_plan)
+    await db.commit()
+
+    saved = (
+        await db.execute(select(AlimentacionPlan).where(AlimentacionPlan.id == nuevo_plan.id))
+    ).scalar_one()
+    return _to_plan_response(saved)
+
+
+@router.put("/planes/{plan_id}", response_model=AlimentacionPlanResponse)
+async def update_plan_alimentacion(
+    plan_id: uuid.UUID,
+    body: AlimentacionPlanUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
+):
+    """Actualiza dosis, frecuencia, estado o meta FCR de un plan de alimentación (HU24)."""
+    plan = (
+        await db.execute(
+            select(AlimentacionPlan).where(
+                AlimentacionPlan.id == plan_id, AlimentacionPlan.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado.")
+
+    update_data = body.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if field in ("cantidad_kg_por_animal", "fcr_objetivo") and value is not None:
+            setattr(plan, field, Decimal(str(value)))
+        elif isinstance(value, str):
+            setattr(plan, field, value.strip())
+        else:
+            setattr(plan, field, value)
+
+    await db.commit()
+    refreshed = (
+        await db.execute(select(AlimentacionPlan).where(AlimentacionPlan.id == plan_id))
+    ).scalar_one()
+    return _to_plan_response(refreshed)
+
+
+@router.delete("/planes/{plan_id}")
+async def delete_plan_alimentacion(
+    plan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
+):
+    """Elimina lógicamente un plan de alimentación (HU24)."""
+    plan = (
+        await db.execute(
+            select(AlimentacionPlan).where(
+                AlimentacionPlan.id == plan_id, AlimentacionPlan.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado.")
+
+    plan.deleted_at = func.clock_timestamp()
+    plan.activo = False
+    await db.commit()
+    return {"message": f"Plan '{plan.nombre}' eliminado correctamente."}
+
+
+@router.get("/conversion-alimenticia", response_model=List[ConversionAlimenticiaItem])
+async def get_conversion_alimenticia(
+    fecha_inicio: Optional[date] = Query(None, description="Fecha inicio período (YYYY-MM-DD)"),
+    fecha_fin: Optional[date] = Query(None, description="Fecha fin período (YYYY-MM-DD)"),
+    corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral específico"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Calcula la Conversión Alimenticia (FCR = kg alimento / kg ganancia) por corral
+    en el rango temporal seleccionado y evalúa alertas frente al estándar Porkcolombia (HU26).
+    """
+    return await calcular_conversion_alimenticia(
+        db=db,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+        corral_id=corral_id,
+    )
 

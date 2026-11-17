@@ -562,11 +562,98 @@ FROM serie_pesos;
 
 -- 6. ÍNDICES DE RENDIMIENTO ADICIONALES Y TRIGGERS DE AUDITORÍA
 CREATE INDEX IF NOT EXISTS idx_inventario_lotes_item ON inventario_lotes (item_id);
+CREATE INDEX IF NOT EXISTS idx_inventario_lotes_vencimiento ON inventario_lotes (fecha_vencimiento) WHERE deleted_at IS NULL AND cantidad_disponible > 0;
 CREATE INDEX IF NOT EXISTS idx_movimientos_inv_item_fecha ON movimientos_inventario (item_id, fecha_movimiento DESC);
+CREATE INDEX IF NOT EXISTS idx_alimentacion_corral_fase_fecha ON alimentacion_raciones (corral_id, fecha_suministro DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_ejecucion_bio_fecha ON ejecucion_bioseguridad (protocolo_id, fecha_registro DESC);
 CREATE INDEX IF NOT EXISTS idx_reprod_servicios_hembra ON reproduccion_servicios (hembra_id, estado_confirmacion, fecha_probable_parto);
 CREATE INDEX IF NOT EXISTS idx_reprod_partos_hembra_fecha ON reproduccion_partos (hembra_id, fecha_parto DESC);
 CREATE INDEX IF NOT EXISTS idx_reprod_destetes_hembra_fecha ON reproduccion_destetes (hembra_id, fecha_destete DESC);
+
+-- 6.1 Planes de Alimentación por Etapa y Corral (HU24)
+CREATE TABLE IF NOT EXISTS alimentacion_planes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    nombre VARCHAR(120) NOT NULL,
+    fase_alimentacion VARCHAR(50) NOT NULL,
+    corral_id UUID REFERENCES corrales(id) ON DELETE SET NULL,
+    alimento_item_id UUID NOT NULL REFERENCES inventario_items(id) ON DELETE RESTRICT,
+    cantidad_kg_por_animal NUMERIC(6,2) NOT NULL CHECK (cantidad_kg_por_animal > 0),
+    frecuencia_diaria INT NOT NULL DEFAULT 2 CHECK (frecuencia_diaria >= 1 AND frecuencia_diaria <= 12),
+    fcr_objetivo NUMERIC(4,2) DEFAULT 2.40 CHECK (fcr_objetivo IS NULL OR fcr_objetivo > 0),
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    creado_por UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    observaciones TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_alimentacion_planes_activo ON alimentacion_planes (fase_alimentacion, corral_id) WHERE deleted_at IS NULL AND activo = TRUE;
+
+-- 6.2 Ciclos Productivos y Auditoría de Vacíos Sanitarios (HU38 - Todo Adentro / Todo Afuera)
+CREATE TABLE IF NOT EXISTS corrales_ciclos_sanitarios (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    corral_id UUID NOT NULL REFERENCES corrales(id) ON DELETE CASCADE,
+    codigo_lote VARCHAR(80) NOT NULL,
+    fecha_entrada DATE NOT NULL,
+    fecha_salida DATE,
+    cantidad_animales INT NOT NULL DEFAULT 0 CHECK (cantidad_animales >= 0),
+    dias_vacio_requerido INT NOT NULL DEFAULT 7 CHECK (dias_vacio_requerido >= 0),
+    desinfeccion_verificada BOOLEAN NOT NULL DEFAULT FALSE,
+    responsable_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    observaciones TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT chk_ciclo_fechas_validas CHECK (fecha_salida IS NULL OR fecha_salida >= fecha_entrada)
+);
+CREATE INDEX IF NOT EXISTS idx_ciclos_corral_entrada ON corrales_ciclos_sanitarios (corral_id, fecha_entrada DESC) WHERE deleted_at IS NULL;
+
+CREATE OR REPLACE VIEW vista_auditoria_vacios_corral AS
+WITH ciclos_ordenados AS (
+    SELECT
+        c.id,
+        c.corral_id,
+        co.codigo AS corral_codigo,
+        co.fase AS corral_fase,
+        c.codigo_lote,
+        c.fecha_entrada,
+        c.fecha_salida,
+        c.cantidad_animales,
+        c.dias_vacio_requerido,
+        c.desinfeccion_verificada,
+        c.observaciones,
+        LAG(c.codigo_lote) OVER (PARTITION BY c.corral_id ORDER BY c.fecha_entrada ASC, c.created_at ASC) AS lote_anterior,
+        LAG(c.fecha_salida) OVER (PARTITION BY c.corral_id ORDER BY c.fecha_entrada ASC, c.created_at ASC) AS fecha_salida_lote_anterior
+    FROM corrales_ciclos_sanitarios c
+    JOIN corrales co ON co.id = c.corral_id
+    WHERE c.deleted_at IS NULL AND co.deleted_at IS NULL
+)
+SELECT
+    id,
+    corral_id,
+    corral_codigo,
+    corral_fase,
+    codigo_lote,
+    lote_anterior,
+    fecha_salida_lote_anterior,
+    fecha_entrada,
+    fecha_salida,
+    cantidad_animales,
+    dias_vacio_requerido,
+    desinfeccion_verificada,
+    observaciones,
+    CASE
+        WHEN fecha_salida_lote_anterior IS NOT NULL
+        THEN (fecha_entrada - fecha_salida_lote_anterior)
+        ELSE NULL
+    END AS dias_vacio_sanitario,
+    CASE
+        WHEN fecha_salida_lote_anterior IS NULL THEN 'primer_ciclo'
+        WHEN (fecha_entrada - fecha_salida_lote_anterior) < dias_vacio_requerido THEN 'alerta_vacio_insuficiente'
+        WHEN NOT desinfeccion_verificada THEN 'pendiente_desinfeccion'
+        ELSE 'cumple_protocolo'
+    END AS estado_auditoria
+FROM ciclos_ordenados;
 
 DO $$
 BEGIN
@@ -608,6 +695,12 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_reproduccion_destetes_updated_at') THEN
         CREATE TRIGGER trg_reproduccion_destetes_updated_at BEFORE UPDATE ON reproduccion_destetes FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_alimentacion_planes_updated_at') THEN
+        CREATE TRIGGER trg_alimentacion_planes_updated_at BEFORE UPDATE ON alimentacion_planes FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_corrales_ciclos_sanitarios_updated_at') THEN
+        CREATE TRIGGER trg_corrales_ciclos_sanitarios_updated_at BEFORE UPDATE ON corrales_ciclos_sanitarios FOR EACH ROW EXECUTE FUNCTION fn_actualizar_updated_at();
     END IF;
 END $$;
 

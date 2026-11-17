@@ -3,8 +3,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
+    Integer,
     Numeric,
     String,
     Text,
@@ -77,3 +79,54 @@ class AlimentacionRacion(Base):
     corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")
     alimento: Mapped[Optional["InventarioItem"]] = relationship("InventarioItem", lazy="joined")
     operario: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")
+
+
+class AlimentacionPlan(Base):
+    """Plan de alimentación estandarizado por etapa productiva o corral (HU24)."""
+
+    __tablename__ = "alimentacion_planes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    fase_alimentacion: Mapped[str] = mapped_column(String(50), nullable=False)
+    corral_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("corrales.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    alimento_item_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("inventario_items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    cantidad_kg_por_animal: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    frecuencia_diaria: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    fcr_objetivo: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True, default=Decimal("2.40"))
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    creado_por: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("usuarios.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    observaciones: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    corral: Mapped[Optional["Corral"]] = relationship("Corral", lazy="joined")
+    alimento: Mapped[Optional["InventarioItem"]] = relationship("InventarioItem", lazy="joined")
+    creador: Mapped[Optional["Usuario"]] = relationship("Usuario", lazy="joined")

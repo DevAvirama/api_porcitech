@@ -5,11 +5,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, require_roles
 from app.models.animal import Animal
-from app.models.corral import Corral
+from app.models.corral import Corral, CorralCicloSanitario
 from app.models.user import Usuario
-from app.schemas.corral import CorralCreate, CorralResponse, CorralUpdate
+from app.schemas.corral import (
+    AuditoriaVacioItem,
+    CorralCicloCreate,
+    CorralCicloResponse,
+    CorralCicloUpdate,
+    CorralCreate,
+    CorralResponse,
+    CorralUpdate,
+)
+from app.services.zootecnia_service import obtener_auditoria_vacios
 
 router = APIRouter()
 
@@ -62,6 +71,127 @@ async def list_corrales(
     result = await db.execute(query)
     rows = result.all()
     return [_to_corral_response(corral, ocupacion) for corral, ocupacion in rows]
+
+
+def _to_ciclo_response(c: CorralCicloSanitario) -> CorralCicloResponse:
+    return CorralCicloResponse(
+        id=c.id,
+        corral_id=c.corral_id,
+        corral_codigo=c.corral.codigo if c.corral else None,
+        codigo_lote=c.codigo_lote,
+        fecha_entrada=c.fecha_entrada,
+        fecha_salida=c.fecha_salida,
+        cantidad_animales=c.cantidad_animales,
+        dias_vacio_requerido=c.dias_vacio_requerido,
+        desinfeccion_verificada=c.desinfeccion_verificada,
+        observaciones=c.observaciones,
+        created_at=c.created_at,
+    )
+
+
+@router.get(
+    "/auditoria-vacios",
+    response_model=List[AuditoriaVacioItem],
+    summary="Auditoría de vacíos sanitarios por corral (HU38)",
+    description="Evalúa los ciclos Todo Adentro / Todo Afuera y alerta sobre incumplimientos de descanso sanitario o desinfección.",
+)
+async def get_auditoria_vacios_corrales(
+    corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral"),
+    fecha_inicio: Optional[date] = Query(None, description="Filtrar ciclos con entrada >= fecha_inicio"),
+    fecha_fin: Optional[date] = Query(None, description="Filtrar ciclos con entrada <= fecha_fin"),
+    solo_alertas: bool = Query(False, description="Mostrar únicamente ciclos con alertas de vacío o desinfección"),
+    db: AsyncSession = Depends(get_db),
+) -> List[AuditoriaVacioItem]:
+    return await obtener_auditoria_vacios(
+        db=db,
+        corral_id=corral_id,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+        solo_alertas=solo_alertas,
+    )
+
+
+@router.post(
+    "/{corral_id}/ciclos",
+    response_model=CorralCicloResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar ciclo sanitario de lote en corral (HU38)",
+)
+async def create_ciclo_sanitario(
+    corral_id: uuid.UUID,
+    body: CorralCicloCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
+) -> CorralCicloResponse:
+    corral = (
+        await db.execute(select(Corral).where(Corral.id == corral_id, Corral.deleted_at.is_(None)))
+    ).scalar_one_or_none()
+    if not corral:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Corral no encontrado.")
+
+    if body.fecha_salida and body.fecha_salida < body.fecha_entrada:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La fecha de salida no puede ser anterior a la fecha de entrada.",
+        )
+
+    ciclo = CorralCicloSanitario(
+        corral_id=corral_id,
+        codigo_lote=body.codigo_lote.strip(),
+        fecha_entrada=body.fecha_entrada,
+        fecha_salida=body.fecha_salida,
+        cantidad_animales=body.cantidad_animales,
+        dias_vacio_requerido=body.dias_vacio_requerido,
+        desinfeccion_verificada=body.desinfeccion_verificada,
+        responsable_id=current_user.id,
+        observaciones=body.observaciones,
+    )
+    db.add(ciclo)
+    await db.commit()
+
+    saved = (
+        await db.execute(select(CorralCicloSanitario).where(CorralCicloSanitario.id == ciclo.id))
+    ).scalar_one()
+    return _to_ciclo_response(saved)
+
+
+@router.put(
+    "/ciclos/{ciclo_id}",
+    response_model=CorralCicloResponse,
+    summary="Actualizar cierre de lote o verificación de desinfección (HU38)",
+)
+async def update_ciclo_sanitario(
+    ciclo_id: uuid.UUID,
+    body: CorralCicloUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_roles(["administrador", "veterinario"])),
+) -> CorralCicloResponse:
+    ciclo = (
+        await db.execute(
+            select(CorralCicloSanitario).where(
+                CorralCicloSanitario.id == ciclo_id, CorralCicloSanitario.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one_or_none()
+    if not ciclo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ciclo sanitario no encontrado.")
+
+    update_data = body.model_dump(exclude_unset=True)
+    new_salida = update_data.get("fecha_salida", ciclo.fecha_salida)
+    if new_salida and new_salida < ciclo.fecha_entrada:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La fecha de salida no puede ser anterior a la fecha de entrada.",
+        )
+
+    for k, v in update_data.items():
+        setattr(ciclo, k, v)
+
+    await db.commit()
+    refreshed = (
+        await db.execute(select(CorralCicloSanitario).where(CorralCicloSanitario.id == ciclo_id))
+    ).scalar_one()
+    return _to_ciclo_response(refreshed)
 
 
 @router.get(

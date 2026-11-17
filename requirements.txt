@@ -14,3 +14,5 @@ opencv-python-headless
 numpy
 ultralytics
 xgboost>=2.0.0
+openpyxl>=3.1.0
+reportlab>=4.1.0
