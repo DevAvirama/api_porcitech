@@ -28,7 +28,12 @@ class InventarioItemBase(BaseModel):
 
 
 class InventarioItemCreate(InventarioItemBase):
-    pass
+    """Alta de insumo. Si `stock_actual > 0` se registra también su lote inicial y la entrada en Kardex."""
+
+    codigo_sku: Optional[str] = None
+    numero_lote: Optional[str] = Field(None, max_length=100)
+    fecha_vencimiento: Optional[date] = None
+    registro_ica: Optional[str] = Field(None, max_length=60)
 
 
 class InventarioLoteResponse(BaseModel):
@@ -95,6 +100,10 @@ class MovimientoInventarioCreate(BaseModel):
     cantidad: float = Field(..., gt=0, description="Cantidad involucrada positiva")
     costo_unitario: Optional[float] = None
     motivo: Optional[str] = None
+    # Solo para 'entrada_compra': crea o incrementa el lote indicado
+    numero_lote: Optional[str] = Field(None, max_length=100)
+    fecha_vencimiento: Optional[date] = None
+    registro_ica: Optional[str] = Field(None, max_length=60)
 
 
 class MovimientoInventarioResponse(BaseModel):

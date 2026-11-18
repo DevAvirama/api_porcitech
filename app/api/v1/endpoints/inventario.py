@@ -29,6 +29,71 @@ from app.schemas.inventario import (
 router = APIRouter()
 
 
+async def _generar_sku_unico(db: AsyncSession, categoria: InventarioCategoria) -> str:
+    """Genera un SKU legible y único (ej. ALI-007) a partir del código de la categoría."""
+    prefijo = (categoria.codigo or "INS")[:3].upper()
+    total = await db.execute(select(InventarioItem.codigo_sku).where(InventarioItem.codigo_sku.like(f"{prefijo}-%")))
+    existentes = {s for s in total.scalars().all() if s}
+    consecutivo = len(existentes) + 1
+    while f"{prefijo}-{consecutivo:03d}" in existentes:
+        consecutivo += 1
+    return f"{prefijo}-{consecutivo:03d}"
+
+
+async def _ingresar_en_lote(
+    db: AsyncSession,
+    item: InventarioItem,
+    cantidad: Decimal,
+    numero_lote: Optional[str],
+    fecha_vencimiento: Optional[date],
+    registro_ica: Optional[str],
+) -> InventarioLote:
+    """
+    Suma `cantidad` al lote `numero_lote` del ítem (lo crea si no existe).
+    No modifica `item.stock_actual`; eso lo hace quien registra el movimiento.
+    """
+    codigo_lote = (numero_lote or "").strip() or f"L-{date.today():%Y%m%d}"
+    existente = (
+        await db.execute(
+            select(InventarioLote)
+            .where(
+                InventarioLote.item_id == item.id,
+                InventarioLote.numero_lote == codigo_lote,
+                InventarioLote.deleted_at.is_(None),
+            )
+            .with_for_update(of=InventarioLote)
+        )
+    ).scalar_one_or_none()
+
+    if existente:
+        existente.cantidad_disponible += cantidad
+        existente.cantidad_inicial += cantidad
+        if fecha_vencimiento and not existente.fecha_vencimiento:
+            existente.fecha_vencimiento = fecha_vencimiento
+        if registro_ica and not existente.registro_ica:
+            existente.registro_ica = registro_ica.strip()
+        return existente
+
+    if fecha_vencimiento and fecha_vencimiento < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La fecha de vencimiento del lote no puede ser anterior a hoy.",
+        )
+
+    lote = InventarioLote(
+        item_id=item.id,
+        numero_lote=codigo_lote,
+        fecha_vencimiento=fecha_vencimiento,
+        cantidad_inicial=cantidad,
+        cantidad_disponible=cantidad,
+        registro_ica=registro_ica.strip() if registro_ica else None,
+        sync_status="synced",
+    )
+    db.add(lote)
+    await db.flush()
+    return lote
+
+
 def _compute_lote_expiry(
     fecha_vencimiento: Optional[date],
     umbral_dias: int = 30,
@@ -139,20 +204,10 @@ async def create_item(
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ):
     """
-    Registra un nuevo artículo de inventario en la base de datos PostgreSQL.
+    Registra un nuevo artículo de inventario. El SKU se genera automáticamente si no se envía
+    y, si llega stock inicial, se crea su primer lote y la entrada correspondiente en el Kardex.
     """
-    await resolve_user_or_fallback(db, current_user)
-
-    check_sku = select(InventarioItem).where(
-        InventarioItem.codigo_sku == item_in.codigo_sku,
-        InventarioItem.deleted_at.is_(None),
-    )
-    res_sku = await db.execute(check_sku)
-    if res_sku.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Ya existe un artículo con el código SKU '{item_in.codigo_sku}'",
-        )
+    user_id = await resolve_user_or_fallback(db, current_user)
 
     cat_query = select(InventarioCategoria).where(InventarioCategoria.id == item_in.categoria_id)
     cat_res = await db.execute(cat_query)
@@ -163,19 +218,51 @@ async def create_item(
             detail=f"Categoría con id '{item_in.categoria_id}' no encontrada",
         )
 
+    sku = (item_in.codigo_sku or "").strip() or await _generar_sku_unico(db, categoria)
+    check_sku = select(InventarioItem).where(
+        InventarioItem.codigo_sku == sku,
+        InventarioItem.deleted_at.is_(None),
+    )
+    res_sku = await db.execute(check_sku)
+    if res_sku.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Ya existe un artículo con el código SKU '{sku}'",
+        )
+
+    stock_inicial = Decimal(str(item_in.stock_actual or 0.0))
     new_item = InventarioItem(
         categoria_id=item_in.categoria_id,
-        codigo_sku=item_in.codigo_sku.strip(),
+        codigo_sku=sku,
         nombre=item_in.nombre.strip(),
         unidad_medida=item_in.unidad_medida.strip(),
         factor_conversion_kg=Decimal(str(item_in.factor_conversion_kg or 1.0)),
-        stock_actual=Decimal(str(item_in.stock_actual or 0.0)),
+        stock_actual=stock_inicial,
         stock_minimo=Decimal(str(item_in.stock_minimo or 0.0)),
         costo_unitario=Decimal(str(item_in.costo_unitario or 0.0)),
         ubicacion_bodega=item_in.ubicacion_bodega.strip() if item_in.ubicacion_bodega else None,
         sync_status="synced",
     )
     db.add(new_item)
+    await db.flush()
+
+    if stock_inicial > 0:
+        lote = await _ingresar_en_lote(
+            db, new_item, stock_inicial, item_in.numero_lote, item_in.fecha_vencimiento, item_in.registro_ica
+        )
+        db.add(
+            MovimientoInventario(
+                item_id=new_item.id,
+                lote_inventario_id=lote.id,
+                tipo_movimiento="entrada_compra",
+                cantidad=stock_inicial,
+                costo_unitario=new_item.costo_unitario,
+                usuario_id=user_id,
+                motivo="Stock inicial al registrar el insumo",
+                sync_status="synced",
+            )
+        )
+
     await db.commit()
     await db.refresh(new_item)
 
@@ -402,6 +489,11 @@ async def register_movimiento(
         item.stock_actual += cantidad_dec
         if lote is not None:
             lote.cantidad_disponible += cantidad_dec
+        elif mov_in.tipo_movimiento == "entrada_compra" and (mov_in.numero_lote or mov_in.fecha_vencimiento):
+            lote = await _ingresar_en_lote(
+                db, item, cantidad_dec, mov_in.numero_lote, mov_in.fecha_vencimiento, mov_in.registro_ica
+            )
+            target_lote_id = lote.id
     elif mov_in.tipo_movimiento in ("salida_consumo", "ajuste_merma"):
         if item.stock_actual < cantidad_dec:
             raise HTTPException(

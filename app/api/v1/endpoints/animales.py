@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal
 from typing import List, Optional
+from urllib.parse import unquote, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,19 @@ from app.schemas.animal import AnimalCreate, AnimalResponse, AnimalUpdate
 router = APIRouter()
 
 ESTADOS_INACTIVOS_CORRAL = ("vendido", "muerto", "descarte")
+
+
+def _extraer_codigo_qr(raw: str) -> str:
+    """
+    Normaliza lo leído de una chapeta: si es la URL del pasaporte público
+    (ej. http://host:3000/trace/QR-2024-002?x=1) devuelve solo 'QR-2024-002'.
+    """
+    code = unquote((raw or "").strip())
+    if "/trace/" in code:
+        code = code.split("/trace/", 1)[1]
+    elif code.lower().startswith(("http://", "https://")):
+        code = urlparse(code).path.rstrip("/").rsplit("/", 1)[-1]
+    return code.split("?", 1)[0].split("#", 1)[0].strip("/ ").strip()
 
 
 async def _validar_corral_y_capacidad(
@@ -121,16 +135,16 @@ async def list_animales(
 
 
 @router.get(
-    "/qr/{codigo_qr}",
+    "/qr/{codigo_qr:path}",
     response_model=AnimalResponse,
     summary="Consultar animal por código QR o arete",
-    description="Endpoint público de trazabilidad para pasaporte sanitario móvil.",
+    description="Endpoint público de trazabilidad. Acepta el código directo o la URL completa del pasaporte (/trace/<codigo>).",
 )
 async def get_animal_by_qr(
     codigo_qr: str,
     db: AsyncSession = Depends(get_db),
 ) -> AnimalResponse:
-    clean_code = codigo_qr.strip()
+    clean_code = _extraer_codigo_qr(codigo_qr)
 
     # Búsqueda principal por código QR o arete (insensible a mayúsculas/minúsculas)
     query = (
