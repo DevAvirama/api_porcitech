@@ -298,7 +298,7 @@ async def create_tratamiento(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Operación bloqueada (HU30 / Normativa ICA): El lote '{target_lote.numero_lote}' "
+                    f"Operación bloqueada por normativa sanitaria ICA: El lote '{target_lote.numero_lote}' "
                     f"venció el {target_lote.fecha_vencimiento.isoformat()}. No está permitido aplicar productos vencidos."
                 ),
             )

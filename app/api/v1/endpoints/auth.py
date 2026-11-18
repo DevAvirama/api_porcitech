@@ -233,5 +233,5 @@ async def reset_password(
     await db.commit()
 
     return ResetPasswordResponse(
-        message="Contraseña actualizada exitosamente y cifrada con Bcrypt. Ya puedes iniciar sesión."
+        message="Contraseña actualizada exitosamente. Ya puedes iniciar sesión."
     )

@@ -161,7 +161,7 @@ async def _collect_report_data(
         sections.append(
             {
                 "sheet": "Pesos y Crecimiento",
-                "title": "Desempeño Biométrico por Corral (TimescaleDB)",
+                "title": "Desempeño y Crecimiento por Corral",
                 "headers": ["Corral", "Fase", "Controles", "Prom (kg)", "Mín (kg)", "Máx (kg)", "Último Control"],
                 "rows": [
                     [

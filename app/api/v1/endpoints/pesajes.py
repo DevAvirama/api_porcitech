@@ -62,7 +62,7 @@ def _obtener_modelo(request: Request) -> Any:
     if model is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="El modelo YOLO no está cargado en el servidor (modo contingencia).",
+            detail="El servicio de estimación visual de peso no está disponible en este momento.",
         )
     return model
 
@@ -94,14 +94,12 @@ async def _persistir_pesaje_vision(
 
     tiempo = datetime.now(timezone.utc)
     nuevo_id = uuid.uuid4()
-    algoritmo = resultado.get("algoritmo_peso") or "alomorfico_huxley"
-    metodo_cal = resultado.get("metodo_calibracion") or "fabrica_cenital"
     ppc_usado = resultado.get("pixels_per_cm_utilizado")
-    obs_ia = f"IA {algoritmo} | Calibración: {metodo_cal}"
+    obs_ia = "Pesaje automático por cámara cenital"
     if ppc_usado:
         obs_ia += f" ({ppc_usado} px/cm)"
-    if resultado.get("aruco_detectado") and resultado.get("aruco_id") is not None:
-        obs_ia += f" | ArUco ID {resultado['aruco_id']}"
+    if resultado.get("aruco_detectado"):
+        obs_ia += " · Escala calibrada en vivo"
 
     db.add(
         RegistroPeso(
@@ -275,8 +273,8 @@ async def calibrar_con_aruco(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "No se detectó ningún marcador ArUco (DICT_4X4_100 / DICT_4X4_50) en la imagen. "
-                "Verifique iluminación, enfoque y que el marcador esté plano y completo."
+                "No se detectó el patrón de calibración en la imagen. "
+                "Verifique iluminación, enfoque y que el patrón esté plano y completo."
             ),
         )
 
@@ -300,8 +298,8 @@ async def calibrar_con_aruco(
     return CalibracionArUcoResponse(
         status="ok",
         mensaje=(
-            f"Calibración ArUco exitosa (ID {resultado['marcador_id']} · {resultado['diccionario']}). "
-            f"Escala guardada: {resultado['pixels_per_cm_base1280']:.3f} px/cm (base 1280px)."
+            f"Calibración de cámara exitosa. "
+            f"Escala guardada: {resultado['pixels_per_cm_base1280']:.3f} px/cm."
         ),
         pixels_per_cm_base1280=round(resultado["pixels_per_cm_base1280"], 3),
         pixels_per_cm_medido=round(resultado["pixels_per_cm_medido"], 3),

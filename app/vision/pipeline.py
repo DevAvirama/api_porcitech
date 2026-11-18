@@ -195,7 +195,7 @@ def detectar_marcador_aruco(
                     cv2.aruco.drawDetectedMarkers(frame, esquinas, ids, borderColor=(255, 255, 0))
                     cv2.putText(
                         frame,
-                        f"ArUco ID {marker_id}: {ppc_medido:.2f} px/cm",
+                        f"Escala: {ppc_medido:.2f} px/cm",
                         (int(pts[0][0]), max(int(pts[0][1]) - 15, 25)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.65,
@@ -447,8 +447,7 @@ def ejecutar_inferencia_morfometrica_sync(
             (16, 185, 129),
             3,
         )
-        algo_tag = "XGB" if cand["algoritmo_peso"] == "xgboost" else "Huxley"
-        etiqueta = f"Porcino: {cand['confianza']*100:.1f}% | {cand['peso_estimado_kg']} kg ({algo_tag})"
+        etiqueta = f"Porcino: {cand['confianza']*100:.1f}% | {cand['peso_estimado_kg']} kg"
         cv2.putText(
             img_anotada,
             etiqueta,

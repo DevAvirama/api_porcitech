@@ -309,7 +309,7 @@ async def consumir_lotes_fefo(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Operación bloqueada (HU30 / Normativa ICA): El lote '{target_lote.numero_lote}' "
+                    f"Operación bloqueada por normativa sanitaria ICA: El lote '{target_lote.numero_lote}' "
                     f"venció el {target_lote.fecha_vencimiento.isoformat()}."
                 ),
             )
@@ -377,7 +377,7 @@ async def consumir_lotes_fefo(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Operación bloqueada (HU30 / Normativa ICA): Todos los lotes disponibles de '{item.nombre}' "
+                f"Operación bloqueada por normativa sanitaria ICA: Todos los lotes disponibles de '{item.nombre}' "
                 "se encuentran vencidos. Registre un lote vigente antes de utilizarlo."
             ),
         )
