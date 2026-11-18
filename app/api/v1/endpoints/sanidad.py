@@ -96,7 +96,7 @@ async def list_protocolos(
 @router.get("/bioseguridad/ejecuciones", response_model=List[EjecucionBioseguridadResponse])
 async def list_ejecuciones(
     fecha: Optional[date] = Query(None, description="Fecha de consulta (por defecto hoy)"),
-    corral_id: Optional[UUID] = Query(None, description="Filtrar por corral específico"),
+    corral_id: Optional[uuid.UUID] = Query(None, description="Filtrar por corral específico"),
     db: AsyncSession = Depends(get_db),
 ):
     """
