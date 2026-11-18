@@ -88,8 +88,9 @@ class PesajeVisionResponse(BaseModel):
     algoritmo_peso: Optional[str] = Field(None, description="'xgboost' o 'alomorfico_huxley'")
     peso_huxley_referencia_kg: Optional[float] = None
     metodo_calibracion: Optional[str] = Field(
-        None, description="'aruco_en_vivo' | 'manual_parametro' | 'aruco_guardado' | 'fabrica_cenital'"
+        None, description="'aruco_en_vivo' | 'manual_parametro' | 'aruco_guardado' | 'adaptativo_movil' | 'fabrica_cenital'"
     )
+    angulo_vista: Optional[str] = Field(None, description="'cenital' | 'oblicuo' | 'lateral'")
     pixels_per_cm_utilizado: Optional[float] = None
     aruco_detectado: bool = False
     aruco_id: Optional[int] = None

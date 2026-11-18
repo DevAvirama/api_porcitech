@@ -128,6 +128,7 @@ def _construir_respuesta_vision(
 ) -> PesajeVisionResponse:
     algoritmo = resultado.get("algoritmo_peso") or "alomorfico_huxley"
     metodo_cal = resultado.get("metodo_calibracion") or "fabrica_cenital"
+    angulo_vista = resultado.get("angulo_vista")
     return PesajeVisionResponse(
         detectado=True,
         fuente=fuente,
@@ -135,6 +136,7 @@ def _construir_respuesta_vision(
         algoritmo_peso=algoritmo,
         peso_huxley_referencia_kg=resultado.get("peso_huxley_referencia_kg"),
         metodo_calibracion=metodo_cal,
+        angulo_vista=angulo_vista,
         pixels_per_cm_utilizado=resultado.get("pixels_per_cm_utilizado"),
         aruco_detectado=bool(resultado.get("aruco_detectado", False)),
         aruco_id=resultado.get("aruco_id"),
@@ -149,7 +151,7 @@ def _construir_respuesta_vision(
         id_registro_persistido=persistencia["id_registro"] if persistencia else None,
         tiempo_registro=persistencia["tiempo"] if persistencia else None,
         peso_actual_kg=persistencia["peso_actual_kg"] if persistencia else None,
-        mensaje=f"Detección dorsal y pesaje biométrico exitoso ({algoritmo} · {metodo_cal}).",
+        mensaje=f"Detección y estimación de peso exitosa ({angulo_vista or 'cenital'}).",
     )
 
 
@@ -320,11 +322,13 @@ async def calibrar_con_aruco(
 )
 async def estimar_peso_vision(
     request: Request,
-    file: UploadFile = File(..., description="Fotografía cenital / dorsal del cerdo"),
+    file: UploadFile = File(..., description="Fotografía del cerdo desde cualquier ángulo"),
     id_cerdo: Optional[uuid.UUID] = Form(None),
     corral_id: Optional[uuid.UUID] = Form(None),
     pixels_per_cm: Optional[float] = Form(None),
     tamano_marcador_cm: float = Form(DEFAULT_MARKER_SIZE_CM),
+    angulo_vista: str = Form("auto"),
+    modo_movil: bool = Form(False),
     persistir: bool = Form(True),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[Usuario] = Depends(get_current_user_optional),
@@ -359,6 +363,8 @@ async def estimar_peso_vision(
                     False,
                     xgb_model,
                     tamano_marcador_cm,
+                    angulo_vista,
+                    modo_movil,
                 )
         else:
             resultado = await asyncio.to_thread(
@@ -370,6 +376,8 @@ async def estimar_peso_vision(
                 False,
                 xgb_model,
                 tamano_marcador_cm,
+                angulo_vista,
+                modo_movil,
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

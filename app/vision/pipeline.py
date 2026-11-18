@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import logging
 import os
@@ -6,10 +7,11 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image, ImageOps
 from ultralytics import YOLO
 
 from app.core.config import settings
@@ -139,6 +141,19 @@ def predict_yolo_safe(
 
 
 def decodificar_bytes_imagen_sync(file_bytes: bytes) -> np.ndarray:
+    """Decodifica bytes JPEG/PNG aplicando rotación EXIF móvil antes de pasar a OpenCV."""
+    try:
+        with Image.open(io.BytesIO(file_bytes)) as pil_img:
+            pil_corregida = ImageOps.exif_transpose(pil_img)
+            if pil_corregida.mode != "RGB":
+                pil_corregida = pil_corregida.convert("RGB")
+            rgb_arr = np.asarray(pil_corregida, dtype=np.uint8)
+            img_bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+            if img_bgr is not None and img_bgr.size > 0:
+                return img_bgr
+    except Exception:
+        pass
+
     arr = np.frombuffer(file_bytes, dtype=np.uint8)
     img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img_bgr is None or img_bgr.size == 0:
@@ -296,6 +311,54 @@ def _estimar_peso_hibrido(
     }
 
 
+_VIEWPOINT_FACTORS: Dict[str, Tuple[float, float, float]] = {
+    # (area_factor, width_factor, length_factor) para normalizar silueta a vista dorsal equivalente
+    "cenital": (1.00, 1.00, 1.00),
+    "oblicuo": (0.84, 0.87, 0.96),
+    "lateral": (0.72, 0.78, 0.94),
+}
+
+
+def _normalizar_angulo_vista(angulo: Optional[str]) -> str:
+    clean = (angulo or "auto").strip().lower()
+    if clean in ("cenital", "superior", "top", "dorsal"):
+        return "cenital"
+    if clean in ("lateral", "perfil", "side"):
+        return "lateral"
+    if clean in ("oblicuo", "3/4", "tres_cuartos", "diagonal", "libre"):
+        return "oblicuo"
+    return "auto"
+
+
+def _inferir_angulo_vista(
+    requested: str,
+    contorno_pts: Optional[np.ndarray],
+    area_px2: float,
+    largo_px: float,
+    ancho_px: float,
+) -> str:
+    """Clasifica si la captura es cenital, oblicua o lateral a partir de la geometría del contorno."""
+    if requested != "auto":
+        return requested
+
+    ratio = largo_px / max(ancho_px, 1.0)
+    solidez = 0.88
+    if contorno_pts is not None and len(contorno_pts) >= 5:
+        try:
+            hull = cv2.convexHull(contorno_pts)
+            hull_area = float(cv2.contourArea(hull))
+            if hull_area > 0:
+                solidez = area_px2 / hull_area
+        except Exception:
+            pass
+
+    if solidez < 0.79 or ratio < 1.85:
+        return "lateral"
+    if solidez >= 0.84 and ratio >= 2.15:
+        return "cenital"
+    return "oblicuo"
+
+
 def ejecutar_inferencia_morfometrica_sync(
     model: YOLO,
     img_bgr: np.ndarray,
@@ -304,9 +367,12 @@ def ejecutar_inferencia_morfometrica_sync(
     validar_bordes: bool = False,
     xgb_model: Optional[Any] = None,
     tamano_marcador_cm: float = DEFAULT_MARKER_SIZE_CM,
+    angulo_vista: Optional[str] = "auto",
+    modo_movil: bool = False,
 ) -> Dict[str, Any]:
     alto_orig, ancho_orig = img_bgr.shape[:2]
     img_anotada = img_bgr.copy()
+    angulo_solicitado = _normalizar_angulo_vista(angulo_vista)
 
     # 1. Resolución de escala métrica (Prioridad: ArUco en vivo > Override manual > Calibración guardada > Fábrica)
     metodo_calibracion = "fabrica_cenital"
@@ -334,15 +400,22 @@ def ejecutar_inferencia_morfometrica_sync(
             metodo_calibracion = "aruco_guardado"
             aruco_id = calib.get("marcador_id")
 
-    factor_resolucion = ancho_orig / float(DEFAULT_REF_WIDTH)
+    # Usar el lado mayor normaliza igual fotos verticales (móvil portrait) y horizontales (landscape)
+    lado_mayor = float(max(ancho_orig, alto_orig))
+    factor_resolucion = lado_mayor / float(DEFAULT_REF_WIDTH)
     pixels_per_cm_efectivo = base_ppc * factor_resolucion
     if pixels_per_cm_efectivo <= 0:
         raise ValueError("El factor de calibración pixels_per_cm debe ser mayor a 0.")
 
-    # 2. Segmentación dorsal con YOLO (thread-safe)
+    # 2. Detección y segmentación con fallback sensible para ángulos laterales u oblicuos en campo
     resultados = predict_yolo_safe(model, img_bgr, conf=conf_threshold)
+    if (not resultados or len(resultados[0].boxes) == 0) and conf_threshold > 0.22:
+        resultados = predict_yolo_safe(model, img_bgr, conf=0.22)
     if not resultados or len(resultados[0].boxes) == 0:
-        raise ValueError("No se detectó ningún ejemplar porcino en la imagen.")
+        raise ValueError(
+            "No se detectó ningún ejemplar porcino en la fotografía. "
+            "Intente enfocar al animal completo con mejor iluminación."
+        )
 
     res = resultados[0]
     boxes = res.boxes
@@ -389,10 +462,35 @@ def ejecutar_inferencia_morfometrica_sync(
             ancho_torax_px = float(ancho_px * 0.92)
             momentos_hu = [0.0] * 7
 
-        largo_cm = round(largo_px / pixels_per_cm_efectivo, 2)
-        ancho_cm = round(ancho_px / pixels_per_cm_efectivo, 2)
-        ancho_toracico_cm = round(ancho_torax_px / pixels_per_cm_efectivo, 2)
-        area_cm2 = round(area_px2 / (pixels_per_cm_efectivo ** 2), 2)
+        angulo_detectado = _inferir_angulo_vista(
+            angulo_solicitado,
+            contorno_pts,
+            area_px2,
+            largo_px,
+            ancho_px,
+        )
+        area_factor, width_factor, length_factor = _VIEWPOINT_FACTORS.get(
+            angulo_detectado,
+            _VIEWPOINT_FACTORS["cenital"],
+        )
+
+        # En captura móvil sin referencia física en escena, ajusta distancia si el operario disparó muy cerca o muy lejos
+        ppc_local = pixels_per_cm_efectivo
+        metodo_local = metodo_calibracion
+        if (modo_movil or angulo_detectado != "cenital") and not aruco_detectado and pixels_per_cm_override is None:
+            largo_norm_1280 = (largo_px * length_factor) / max(factor_resolucion, 0.25)
+            largo_implicito_cm = largo_norm_1280 / max(base_ppc, 0.1)
+            if largo_implicito_cm > 132.0:
+                ppc_local = (largo_norm_1280 / 118.0) * factor_resolucion
+                metodo_local = "adaptativo_movil"
+            elif largo_implicito_cm < 58.0:
+                ppc_local = (largo_norm_1280 / 74.0) * factor_resolucion
+                metodo_local = "adaptativo_movil"
+
+        largo_cm = round((largo_px * length_factor) / ppc_local, 2)
+        ancho_cm = round((ancho_px * width_factor) / ppc_local, 2)
+        ancho_toracico_cm = round((ancho_torax_px * width_factor) / ppc_local, 2)
+        area_cm2 = round((area_px2 * area_factor) / (ppc_local ** 2), 2)
         ratio_aspecto = round(largo_cm / max(ancho_cm, 0.01), 2)
 
         vector_xgboost = [
@@ -421,6 +519,9 @@ def ejecutar_inferencia_morfometrica_sync(
                 "ancho_cm": ancho_cm,
                 "ancho_toracico_cm": ancho_toracico_cm,
                 "ratio_aspecto": ratio_aspecto,
+                "angulo_vista": angulo_detectado,
+                "metodo_calibracion": metodo_local,
+                "ppc_efectivo": ppc_local,
                 "x1": x1,
                 "y1": y1,
                 "x2": x2,
@@ -431,8 +532,8 @@ def ejecutar_inferencia_morfometrica_sync(
 
     if not candidatos:
         if descartados_borde > 0:
-            raise ValueError("El porcino toca el borde del encuadre cenital. Capture cuando esté centrado.")
-        raise ValueError("No se detectó ningún ejemplar porcino con área suficiente en la imagen.")
+            raise ValueError("El porcino toca el borde del encuadre. Capture cuando esté centrado.")
+        raise ValueError("No se detectó ningún ejemplar porcino con tamaño suficiente en la imagen.")
 
     candidatos.sort(key=lambda c: c["confianza"], reverse=True)
     principal = candidatos[0]
@@ -447,7 +548,7 @@ def ejecutar_inferencia_morfometrica_sync(
             (16, 185, 129),
             3,
         )
-        etiqueta = f"Porcino: {cand['confianza']*100:.1f}% | {cand['peso_estimado_kg']} kg"
+        etiqueta = f"Porcino: {cand['confianza']*100:.0f}% | {cand['peso_estimado_kg']} kg"
         cv2.putText(
             img_anotada,
             etiqueta,
@@ -460,13 +561,17 @@ def ejecutar_inferencia_morfometrica_sync(
 
     _, buffer_jpg = cv2.imencode(".jpg", img_anotada, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     imagen_base64 = f"data:image/jpeg;base64,{base64.b64encode(buffer_jpg).decode('utf-8')}"
+    ppc_final = float(principal.get("ppc_efectivo", pixels_per_cm_efectivo))
+    metodo_final = str(principal.get("metodo_calibracion", metodo_calibracion))
+    angulo_final = str(principal.get("angulo_vista", "cenital"))
 
     return {
         "peso_estimado_kg": principal["peso_estimado_kg"],
         "algoritmo_peso": principal["algoritmo_peso"],
         "peso_huxley_referencia_kg": principal["peso_huxley_referencia_kg"],
-        "metodo_calibracion": metodo_calibracion,
-        "pixels_per_cm_utilizado": round(pixels_per_cm_efectivo, 3),
+        "metodo_calibracion": metodo_final,
+        "angulo_vista": angulo_final,
+        "pixels_per_cm_utilizado": round(ppc_final, 3),
         "aruco_detectado": aruco_detectado,
         "aruco_id": aruco_id,
         "confianza": principal["confianza"],
@@ -480,9 +585,10 @@ def ejecutar_inferencia_morfometrica_sync(
             "x2": round(principal["x2"], 1),
             "y2": round(principal["y2"], 1),
             "resolucion": f"{ancho_orig}x{alto_orig}",
-            "pixels_per_cm": round(pixels_per_cm_efectivo, 3),
+            "pixels_per_cm": round(ppc_final, 3),
             "algoritmo_peso": principal["algoritmo_peso"],
-            "metodo_calibracion": metodo_calibracion,
+            "metodo_calibracion": metodo_final,
+            "angulo_vista": angulo_final,
             "aruco_detectado": aruco_detectado,
             "aruco_id": aruco_id,
             "ancho_toracico_cm": principal["ancho_toracico_cm"],
